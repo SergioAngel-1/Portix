@@ -80,8 +80,12 @@ mod tests {
     fn test_sanitize_control_chars() {
         let input = "hello\x01world\x02!";
         let clean = sanitize_for_terminal(input);
-        assert!(clean.contains("helloworld!"));
+        // Control chars are replaced with "·"
+        assert!(clean.contains("hello"));
+        assert!(clean.contains("world"));
         assert!(clean.contains("·"));
+        assert!(!clean.contains('\x01'));
+        assert!(!clean.contains('\x02'));
     }
 
     #[test]

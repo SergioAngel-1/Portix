@@ -59,12 +59,25 @@ pub fn parse_proc_net_line(line: &str, protocol: Protocol) -> Option<Socket> {
         return None;
     }
 
+    // The format is: "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode"
+    // After splitting by whitespace:
+    // [0] = "0:" (sl)
+    // [1] = "0100007F:1F90" (local_address)
+    // [2] = "00000000:0000" (rem_address)
+    // [3] = "0A" (st - state)
+    // [4] = "00000000:00000000" (tx_queue)
+    // [5] = "00:00000000" (tr:tm->when)
+    // [6] = "00000000" (retrnsmt)
+    // [7] = "1000" (uid)
+    // [8] = "0" (timeout)
+    // [9] = "486312" (inode)
+
     // Parse local_address (index 1): "ADDR:PORT" in hex
     let local_addr_str = parts.get(1)?;
     let (addr_hex, port_hex) = local_addr_str.rsplit_once(':')?;
 
-    // Parse state (index 2)
-    let state_hex = parts.get(2)?;
+    // Parse state (index 3)
+    let state_hex = parts.get(3)?;
     let state = TcpState::from_hex(state_hex)?;
 
     // Parse uid (index 7)
@@ -122,6 +135,12 @@ mod tests {
     #[test]
     fn test_parse_tcp_listen() {
         let line = "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 486312 1 ffff888101234567 100 0 0 10 0";
+        // Debug: print the parts
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        eprintln!("Parts count: {}", parts.len());
+        for (i, part) in parts.iter().enumerate() {
+            eprintln!("  [{}]: {:?}", i, part);
+        }
         let socket = parse_proc_net_line(line, Protocol::Tcp).unwrap();
         assert_eq!(socket.port, 8080);
         assert_eq!(socket.state, TcpState::Listen);
