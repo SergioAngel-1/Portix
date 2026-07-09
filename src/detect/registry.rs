@@ -1,6 +1,64 @@
-use crate::detect::signals::Signal;
-use crate::model::{Framework, FrameworkConfidence, Language};
+use crate::detect::signals::{kinds, Signal};
+use crate::model::{Framework, Language};
 use std::path::Path;
+
+/// (framework id, executable name under node_modules/.bin)
+const NODE_BINARIES: &[(&str, &str)] = &[
+    ("nextjs", "next"),
+    ("vite", "vite"),
+    ("astro", "astro"),
+    ("nuxt", "nuxt"),
+    ("remix", "remix"),
+    ("nestjs", "nest"),
+];
+
+/// (framework id, dependency key in package.json)
+const NODE_DEPENDENCIES: &[(&str, &str)] = &[
+    ("nextjs", "next"),
+    ("vite", "vite"),
+    ("astro", "astro"),
+    ("nuxt", "nuxt"),
+    ("remix", "@remix-run/node"),
+    ("nestjs", "@nestjs/core"),
+    ("express", "express"),
+];
+
+/// (framework id, files whose presence implies it)
+const PROJECT_FILES: &[(&str, &[&str])] = &[
+    ("nextjs", &["next.config.js", "next.config.ts", "next.config.mjs"]),
+    ("vite", &["vite.config.js", "vite.config.ts", "vite.config.mjs"]),
+    ("astro", &["astro.config.mjs", "astro.config.ts"]),
+    ("nuxt", &["nuxt.config.ts", "nuxt.config.js"]),
+    ("nestjs", &["nest-cli.json"]),
+    ("django", &["manage.py"]),
+    ("go", &["go.mod"]),
+    ("rust", &["Cargo.toml"]),
+];
+
+/// The port a framework is conventionally served on.
+fn conventional_port(port: u16) -> Option<&'static str> {
+    match port {
+        3000 => Some("nextjs"),
+        5173 => Some("vite"),
+        4321 => Some("astro"),
+        8000 => Some("django"),
+        _ => None,
+    }
+}
+
+/// Read the merged dependency map from a package.json, if there is one.
+fn read_dependencies(root: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let content = std::fs::read_to_string(root.join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let mut merged = serde_json::Map::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(obj) = json.get(key).and_then(|d| d.as_object()) {
+            merged.extend(obj.clone());
+        }
+    }
+    Some(merged)
+}
 
 /// Framework relationship types.
 #[derive(Debug, Clone)]
@@ -14,6 +72,12 @@ pub enum Relation {
 /// Registry of framework detectors.
 pub struct DetectorRegistry {
     relations: Vec<Relation>,
+}
+
+impl Default for DetectorRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DetectorRegistry {
@@ -55,21 +119,17 @@ impl DetectorRegistry {
         let signals = self.collect_signals(cwd, exe, cmdline, port);
         let scores = crate::detect::scoring::score_signals(&signals);
 
-        if scores.is_empty() {
-            return None;
-        }
-
-        // Find the best scoring framework
-        let mut best: Option<(&str, f64)> = None;
-        for (fw_id, score) in &scores {
-            if *score >= 0.3 {
-                if best.is_none() || *score > best.unwrap().1 {
-                    best = Some((fw_id.as_str(), *score));
-                }
-            }
-        }
-
-        let (best_id, best_score) = best?;
+        // Iterating a HashMap is not deterministic, so ties must be broken by
+        // something stable or the same process detects differently across runs.
+        let (best_id, best_score) = scores
+            .iter()
+            .filter(|(_, score)| **score >= 0.3)
+            .max_by(|a, b| {
+                a.1.partial_cmp(b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.0.cmp(a.0))
+            })
+            .map(|(id, score)| (id.as_str(), *score))?;
 
         // Check for supersedes relationships
         let display_id = self.resolve_supersedes(best_id, &scores);
@@ -95,115 +155,95 @@ impl DetectorRegistry {
     /// Collect all signals from various sources.
     fn collect_signals(
         &self,
-        cwd: Option<&Path>,
+        root: Option<&Path>,
         exe: Option<&Path>,
         cmdline: &[String],
-        _port: u16,
+        port: u16,
     ) -> Vec<Signal> {
         let mut signals = Vec::new();
         let cmdline_str = cmdline.join(" ");
 
-        // Binary name signals
-        if let Some(exe) = exe {
-            if let Some(name) = exe.file_name().and_then(|n| n.to_str()) {
-                match name {
-                    "node" | "bun" | "deno" => {
-                        signals.push(Signal::new("node", 0.3, format!("exe:{}", name)));
-                    }
-                    "python" | "python3" => {
-                        signals.push(Signal::new("python", 0.3, format!("exe:{}", name)));
-                    }
-                    _ => {}
-                }
+        // Interpreter: weak on its own, but it is what separates "some Python
+        // thing" from "no idea at all". Distros ship `python3.13`, not `python`.
+        if let Some(name) = exe.and_then(|e| e.file_name()).and_then(|n| n.to_str()) {
+            let runtime = if matches!(name, "node" | "bun" | "deno") {
+                Some("node")
+            } else if name.starts_with("python") {
+                Some("python")
+            } else {
+                None
+            };
+
+            if let Some(runtime) = runtime {
+                signals.push(Signal::new(
+                    runtime,
+                    kinds::EXE_BASENAME,
+                    format!("exe:{name}"),
+                ));
             }
         }
 
-        // Cmdline signals for Node.js
-        if cmdline_str.contains("node_modules/.bin/next") {
-            signals.push(Signal::new(
-                "nextjs",
-                0.85,
-                "cmdline_script_path:node_modules/.bin/next",
-            ));
+        // A script path under node_modules/.bin is near-proof: unlike a bare
+        // substring match on "next", it cannot fire on a user named `next`.
+        for (id, bin) in NODE_BINARIES {
+            let needle = format!("node_modules/.bin/{bin}");
+            if cmdline_str.contains(&needle) {
+                signals.push(Signal::new(
+                    *id,
+                    kinds::CMDLINE_SCRIPT_PATH,
+                    format!("cmdline_script_path:{needle}"),
+                ));
+            }
         }
-        if cmdline_str.contains("node_modules/.bin/vite") {
-            signals.push(Signal::new(
-                "vite",
-                0.85,
-                "cmdline_script_path:node_modules/.bin/vite",
-            ));
+
+        if cmdline_str.contains("-m uvicorn") || cmdline_str.contains("uvicorn ") {
+            signals.push(Signal::new("uvicorn", kinds::CMDLINE_MODULE, "cmdline:uvicorn"));
         }
-        if cmdline_str.contains("node_modules/.bin/astro") {
-            signals.push(Signal::new(
-                "astro",
-                0.85,
-                "cmdline_script_path:node_modules/.bin/astro",
-            ));
-        }
-        if cmdline_str.contains("node_modules/.bin/nest") {
-            signals.push(Signal::new(
-                "nestjs",
-                0.85,
-                "cmdline_script_path:node_modules/.bin/nest",
-            ));
-        }
-        if cmdline_str.contains("-m uvicorn") {
-            signals.push(Signal::new(
-                "fastapi",
-                0.9,
-                "cmdline:-m uvicorn",
-            ));
+        if cmdline_str.contains("gunicorn") {
+            signals.push(Signal::new("gunicorn", kinds::CMDLINE_BINARY, "cmdline:gunicorn"));
         }
         if cmdline_str.contains("manage.py") && cmdline_str.contains("runserver") {
             signals.push(Signal::new(
                 "django",
-                0.8,
+                kinds::CMDLINE_ARG,
                 "cmdline:manage.py runserver",
             ));
         }
+        if cmdline_str.contains("flask") {
+            signals.push(Signal::new("flask", kinds::CMDLINE_BINARY, "cmdline:flask"));
+        }
 
-        // Project file signals
-        if let Some(cwd) = cwd {
-            if cwd.join("next.config.js").exists() || cwd.join("next.config.ts").exists() {
+        let Some(root) = root else {
+            return signals;
+        };
+
+        for (id, files) in PROJECT_FILES {
+            if let Some(found) = files.iter().find(|f| root.join(f).exists()) {
                 signals.push(Signal::new(
-                    "nextjs",
-                    0.7,
-                    "file:next.config.{js,ts}",
+                    *id,
+                    kinds::PROJECT_FILE,
+                    format!("file:{found}"),
                 ));
             }
-            if cwd.join("vite.config.js").exists() || cwd.join("vite.config.ts").exists() {
-                signals.push(Signal::new(
-                    "vite",
-                    0.7,
-                    "file:vite.config.{js,ts}",
-                ));
-            }
-            if cwd.join("astro.config.mjs").exists() {
-                signals.push(Signal::new("astro", 0.7, "file:astro.config.mjs"));
-            }
-            if cwd.join("manage.py").exists() {
-                signals.push(Signal::new("django", 0.7, "file:manage.py"));
-            }
+        }
 
-            // Dependency signals
-            if let Ok(content) = std::fs::read_to_string(cwd.join("package.json")) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(deps) = json.get("dependencies") {
-                        if deps.get("next").is_some() {
-                            signals.push(Signal::new(
-                                "nextjs",
-                                0.9,
-                                "dep:next",
-                            ));
-                        }
-                        if deps.get("vite").is_some() {
-                            signals.push(Signal::new("vite", 0.9, "dep:vite"));
-                        }
-                        if deps.get("astro").is_some() {
-                            signals.push(Signal::new("astro", 0.9, "dep:astro"));
-                        }
-                    }
+        // A declared dependency is the strongest evidence short of the binary.
+        if let Some(deps) = read_dependencies(root) {
+            for (id, dep) in NODE_DEPENDENCIES {
+                if deps.get(*dep).is_some() {
+                    signals.push(Signal::new(*id, kinds::MANIFEST_DEP, format!("dep:{dep}")));
                 }
+            }
+        }
+
+        // Port conventions never decide alone; they only break ties.
+        if let Some(id) = conventional_port(port) {
+            if signals.iter().any(|s| s.framework_id == id) {
+                signals.push(Signal::new(
+                    id,
+                    kinds::PORT_CONVENTION,
+                    format!("port:{port}"),
+                ));
             }
         }
 
@@ -263,5 +303,114 @@ fn framework_language(id: &str) -> Language {
         "go" => Language::Go,
         "rust" => Language::Rust,
         _ => Language::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.path().join(name), content).unwrap();
+        }
+        dir
+    }
+
+    fn detect(root: &Path, cmdline: &[&str], port: u16) -> Option<Framework> {
+        let cmdline: Vec<String> = cmdline.iter().map(|s| s.to_string()).collect();
+        let exe = PathBuf::from("/usr/bin/node");
+        DetectorRegistry::new().detect(Some(root), Some(&exe), &cmdline, port)
+    }
+
+    #[test]
+    fn test_next_dev_is_detected_with_high_confidence() {
+        let dir = project(&[
+            ("package.json", r#"{"dependencies":{"next":"^15.1.0"}}"#),
+            ("next.config.ts", ""),
+        ]);
+        let fw = detect(
+            dir.path(),
+            &["node", "/w/node_modules/.bin/next", "dev"],
+            3000,
+        )
+        .unwrap();
+
+        assert_eq!(fw.id, "nextjs");
+        assert_eq!(fw.confidence, crate::model::FrameworkConfidence::High);
+    }
+
+    /// Next.js pulls in React. Both score, but only one is the answer.
+    #[test]
+    fn test_nextjs_supersedes_react() {
+        let mut scores = std::collections::HashMap::new();
+        scores.insert("react".to_string(), 0.9);
+        scores.insert("nextjs".to_string(), 0.85);
+
+        let registry = DetectorRegistry::new();
+        assert_eq!(registry.resolve_supersedes("react", &scores), "nextjs");
+    }
+
+    /// The bug this replaces: `cmdline.contains("next")` fired on any path with
+    /// "next" in it. Only a real node_modules/.bin path or dep counts.
+    #[test]
+    fn test_a_path_containing_next_does_not_imply_nextjs() {
+        let dir = project(&[("package.json", r#"{"dependencies":{}}"#)]);
+        let fw = detect(dir.path(), &["node", "/home/next/server.js"], 9999);
+        assert!(fw.is_none() || fw.unwrap().id != "nextjs");
+    }
+
+    #[test]
+    fn test_dev_dependencies_count_as_evidence() {
+        // Vite lives in devDependencies in essentially every real project.
+        let dir = project(&[("package.json", r#"{"devDependencies":{"vite":"^5"}}"#)]);
+        let fw = detect(dir.path(), &["node", "server.js"], 5173).unwrap();
+        assert_eq!(fw.id, "vite");
+    }
+
+    #[test]
+    fn test_port_convention_never_decides_alone() {
+        // Port 3000 with no other Next.js evidence falls back to the runtime,
+        // never to Next.js.
+        let dir = project(&[("package.json", r#"{"dependencies":{}}"#)]);
+        let fw = detect(dir.path(), &["node", "server.js"], 3000).unwrap();
+        assert_eq!(fw.id, "node");
+        assert_eq!(fw.confidence, crate::model::FrameworkConfidence::Low);
+    }
+
+    #[test]
+    fn test_detection_is_deterministic_across_runs() {
+        let dir = project(&[(
+            "package.json",
+            r#"{"dependencies":{"vite":"^5","astro":"^4"}}"#,
+        )]);
+        let first = detect(dir.path(), &["node", "x"], 0).unwrap().id;
+        for _ in 0..20 {
+            assert_eq!(detect(dir.path(), &["node", "x"], 0).unwrap().id, first);
+        }
+    }
+
+    /// Distros ship the interpreter as `python3.13`, never as bare `python`.
+    #[test]
+    fn test_versioned_python_interpreter_is_recognised() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline = vec!["python".to_string(), "app.py".to_string()];
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 8777)
+            .unwrap();
+        assert_eq!(fw.id, "python");
+    }
+
+    #[test]
+    fn test_unknown_binary_yields_no_framework() {
+        let dir = project(&[]);
+        let cmdline = vec!["/usr/sbin/sshd".to_string()];
+        let exe = PathBuf::from("/usr/sbin/sshd");
+        assert!(DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 22)
+            .is_none());
     }
 }

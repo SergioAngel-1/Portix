@@ -15,7 +15,7 @@ pub fn container_of(proc_root: &Path, pid: i32) -> Option<Container> {
         }
 
         // Try v1 format: "n:subsystem:/docker/..."
-        if let Some(rest) = line.splitn(2, ':').nth(1) {
+        if let Some(rest) = line.split_once(':').map(|x| x.1) {
             if let Some(container) = parse_cgroup_path(rest) {
                 return Some(container);
             }

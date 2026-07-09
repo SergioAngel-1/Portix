@@ -1,28 +1,22 @@
 use crate::model::Service;
+use crate::ui::format::{cell, format_bytes_compact, format_uptime, truncate_center};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Row, Table, TableState},
+    widgets::{Row, Table, TableState},
     Frame,
 };
 
-/// Render the main service table.
-pub fn render(
-    f: &mut Frame,
-    area: Rect,
-    services: &[&Service],
-    selected: usize,
-    show_detail: bool,
-) {
-    // Calculate column widths based on available width
-    let width = area.width as usize;
+const DASH: &str = "—";
 
+/// Render the main service table.
+pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize) {
     let header = Row::new(vec![
         "PORT",
         "PROTO",
         "PROJECT",
         "FRAMEWORK",
+        "COMMAND",
         "PID",
         "CPU",
         "MEM",
@@ -36,37 +30,36 @@ pub fn render(
 
     let rows: Vec<Row> = services
         .iter()
-        .enumerate()
-        .map(|(idx, service)| {
+        .map(|service| {
+            let process = service.process.as_ref();
+
+            // Every one of these strings can carry attacker-controlled bytes
+            // (project names, argv). `cell` is the sanitizing chokepoint.
             let port = format!("{:>5}", service.socket.port);
-            let proto = format!("{:<5}", service.socket.protocol);
-            let project = truncate_center(&service.project_display(), 20);
-            let framework = truncate_center(&service.framework_display(), 16);
-            let pid = service
-                .process
-                .as_ref()
-                .map(|p| format!("{:>5}", p.pid))
-                .unwrap_or_else(|| "    —".to_string());
-            let cpu = service
-                .process
-                .as_ref()
+            let proto = service.socket.proto_display();
+            let project = cell(&truncate_center(&service.project_display(), 20));
+            let framework = cell(&truncate_center(&service.framework_display(), 16));
+            let command = cell(&truncate_center(&service.command_display(), 16));
+
+            let pid = process
+                .map(|p| format!("{:>6}", p.pid))
+                .unwrap_or_else(|| format!("{:>6}", DASH));
+            let cpu = process
                 .and_then(|p| p.metrics.cpu_percent)
                 .map(|c| format!("{:>5.1}%", c))
-                .unwrap_or_else(|| "    —".to_string());
-            let mem = service
-                .process
-                .as_ref()
+                .unwrap_or_else(|| format!("{:>6}", DASH));
+            let mem = process
                 .and_then(|p| p.metrics.rss_bytes)
-                .map(|m| format_mem(m))
-                .unwrap_or_else(|| "   —".to_string());
-            let uptime = service
-                .process
-                .as_ref()
+                .map(format_bytes_compact)
+                .unwrap_or_else(|| DASH.to_string());
+            let uptime = process
                 .and_then(|p| p.metrics.uptime)
-                .map(|u| format_duration(u))
-                .unwrap_or_else(|| "   —".to_string());
+                .map(format_uptime)
+                .unwrap_or_else(|| DASH.to_string());
 
-            Row::new(vec![port, proto, project, framework, pid, cpu, mem, uptime])
+            Row::new(vec![
+                port, proto, project, framework, command, pid, cpu, mem, uptime,
+            ])
         })
         .collect();
 
@@ -74,16 +67,17 @@ pub fn render(
         ratatui::layout::Constraint::Length(6),
         ratatui::layout::Constraint::Length(6),
         ratatui::layout::Constraint::Min(15),
-        ratatui::layout::Constraint::Length(18),
-        ratatui::layout::Constraint::Length(6),
-        ratatui::layout::Constraint::Length(6),
-        ratatui::layout::Constraint::Length(5),
+        ratatui::layout::Constraint::Length(17),
+        ratatui::layout::Constraint::Length(17),
+        ratatui::layout::Constraint::Length(7),
+        ratatui::layout::Constraint::Length(7),
+        ratatui::layout::Constraint::Length(7),
         ratatui::layout::Constraint::Length(8),
     ];
 
     let table = Table::new(rows, widths)
         .header(header)
-        .highlight_style(
+        .row_highlight_style(
             Style::default()
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
@@ -91,42 +85,9 @@ pub fn render(
         .highlight_symbol("▸ ");
 
     let mut state = TableState::default();
-    state.select(Some(selected));
+    if !services.is_empty() {
+        state.select(Some(selected));
+    }
 
     f.render_stateful_widget(table, area, &mut state);
-}
-
-/// Truncate a string from the center.
-fn truncate_center(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        let keep = (max_len - 3) / 2;
-        format!("{}...{}", &s[..keep], &s[s.len() - keep..])
-    }
-}
-
-/// Format memory size.
-fn format_mem(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.0} K", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.0} M", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
-/// Format duration.
-fn format_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    }
 }

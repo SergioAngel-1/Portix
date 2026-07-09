@@ -1,5 +1,6 @@
-use crate::model::{Framework, Process, Project};
+use crate::model::{Framework, Process, ProcessKey, Project};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Cache entry with TTL.
@@ -23,45 +24,75 @@ impl<T> CacheEntry<T> {
     }
 }
 
+/// The parts of a process that cannot change while it lives.
+///
+/// Deliberately excludes metrics: RSS and CPU move every second, and caching
+/// them is how a monitor starts lying. Only the immutable half is memoized.
+#[derive(Debug, Clone)]
+pub struct ProcessStatic {
+    pub name: String,
+    pub ppid: i32,
+    pub cmdline: Vec<String>,
+    pub exe: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
+    pub started_at: Option<std::time::SystemTime>,
+}
+
+impl From<&Process> for ProcessStatic {
+    fn from(p: &Process) -> Self {
+        Self {
+            name: p.name.clone(),
+            ppid: p.ppid,
+            cmdline: p.cmdline.clone(),
+            exe: p.exe.clone(),
+            cwd: p.cwd.clone(),
+            started_at: p.started_at,
+        }
+    }
+}
+
+/// A CPU sample: the process and system jiffy counters, read at the same moment.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuSample {
+    pub proc_jiffies: u64,
+    pub total_jiffies: u64,
+}
+
 /// Multi-level cache for process data.
+#[derive(Default)]
 pub struct CacheStore {
-    /// L1: Process metadata (pid, starttime) -> Process
-    l1_process: HashMap<(i32, u64), CacheEntry<Process>>,
-    /// L2: Project (inode of cwd) -> Project
+    /// L1: immutable process metadata, keyed by (pid, starttime).
+    l1_process: HashMap<ProcessKey, ProcessStatic>,
+    /// L2: Project, keyed by the inode of the cwd (not its path).
     l2_project: HashMap<u64, CacheEntry<Option<Project>>>,
-    /// L3: Framework (inode of root, mtime of manifest) -> Framework
-    l3_framework: HashMap<(u64, u64), CacheEntry<Option<Framework>>>,
-    /// L4: Users (uid) -> username
+    /// L3: Framework, keyed by (inode of project root, mtime of manifest).
+    l3_framework: HashMap<(u64, u64), Option<Framework>>,
+    /// L4: uid -> username.
     l4_users: HashMap<u32, CacheEntry<String>>,
+    /// Previous CPU counters, keyed by (pid, starttime).
+    cpu_samples: HashMap<ProcessKey, CpuSample>,
 }
 
 impl CacheStore {
     pub fn new() -> Self {
-        Self {
-            l1_process: HashMap::new(),
-            l2_project: HashMap::new(),
-            l3_framework: HashMap::new(),
-            l4_users: HashMap::new(),
-        }
+        Self::default()
     }
 
-    /// Get a process from L1 cache.
-    pub fn get_process(&self, pid: i32, starttime: u64) -> Option<&Process> {
-        self.l1_process
-            .get(&(pid, starttime))
-            .filter(|e| e.is_valid())
-            .map(|e| &e.value)
+    /// Get immutable process metadata.
+    ///
+    /// Keyed on `(pid, starttime)` and never on `pid` alone: PIDs are recycled,
+    /// and a hit on a recycled PID would show a dead process's project.
+    pub fn get_process(&self, key: ProcessKey) -> Option<&ProcessStatic> {
+        self.l1_process.get(&key)
     }
 
-    /// Insert a process into L1 cache.
-    pub fn insert_process(&mut self, pid: i32, starttime: u64, process: Process) {
-        self.l1_process.insert(
-            (pid, starttime),
-            CacheEntry::new(process, Duration::from_secs(60)),
-        );
+    pub fn insert_process(&mut self, key: ProcessKey, value: ProcessStatic) {
+        self.l1_process.insert(key, value);
     }
 
-    /// Get a project from L2 cache.
+    /// Get a project from L2 cache. The outer Option is "cached?", the inner is
+    /// "is there a project?" — negative results are cached too, otherwise every
+    /// scan re-walks the directory tree for sshd and systemd-resolved.
     pub fn get_project(&self, cwd_inode: u64) -> Option<&Option<Project>> {
         self.l2_project
             .get(&cwd_inode)
@@ -69,31 +100,27 @@ impl CacheStore {
             .map(|e| &e.value)
     }
 
-    /// Insert a project into L2 cache.
     pub fn insert_project(&mut self, cwd_inode: u64, project: Option<Project>) {
-        self.l2_project.insert(
-            cwd_inode,
-            CacheEntry::new(project, Duration::from_secs(60)),
-        );
+        self.l2_project
+            .insert(cwd_inode, CacheEntry::new(project, Duration::from_secs(60)));
     }
 
-    /// Get a framework from L3 cache.
+    /// Get a framework. No TTL: the manifest mtime is part of the key, so a
+    /// `pnpm add next@16` produces a different key and a natural miss.
     pub fn get_framework(&self, root_inode: u64, manifest_mtime: u64) -> Option<&Option<Framework>> {
+        self.l3_framework.get(&(root_inode, manifest_mtime))
+    }
+
+    pub fn insert_framework(
+        &mut self,
+        root_inode: u64,
+        manifest_mtime: u64,
+        framework: Option<Framework>,
+    ) {
         self.l3_framework
-            .get(&(root_inode, manifest_mtime))
-            .filter(|e| e.is_valid())
-            .map(|e| &e.value)
+            .insert((root_inode, manifest_mtime), framework);
     }
 
-    /// Insert a framework into L3 cache.
-    pub fn insert_framework(&mut self, root_inode: u64, manifest_mtime: u64, framework: Option<Framework>) {
-        self.l3_framework.insert(
-            (root_inode, manifest_mtime),
-            CacheEntry::new(framework, Duration::from_secs(60)),
-        );
-    }
-
-    /// Get a username from L4 cache.
     pub fn get_user(&self, uid: u32) -> Option<&String> {
         self.l4_users
             .get(&uid)
@@ -101,32 +128,120 @@ impl CacheStore {
             .map(|e| &e.value)
     }
 
-    /// Insert a username into L4 cache.
     pub fn insert_user(&mut self, uid: u32, username: String) {
-        self.l4_users.insert(
-            uid,
-            CacheEntry::new(username, Duration::from_secs(300)),
-        );
+        self.l4_users
+            .insert(uid, CacheEntry::new(username, Duration::from_secs(300)));
     }
 
-    /// Invalidate a process entry.
-    pub fn invalidate_process(&mut self, pid: i32, starttime: u64) {
-        self.l1_process.remove(&(pid, starttime));
+    /// Read the previous CPU sample for a process, then store the current one.
+    pub fn swap_cpu_sample(&mut self, key: ProcessKey, current: CpuSample) -> Option<CpuSample> {
+        self.cpu_samples.insert(key, current)
     }
 
-    /// Clear all caches.
-    pub fn clear(&mut self) {
-        self.l1_process.clear();
-        self.l2_project.clear();
-        self.l3_framework.clear();
-        self.l4_users.clear();
-    }
-
-    /// Remove expired entries.
-    pub fn cleanup(&mut self) {
-        self.l1_process.retain(|_, e| e.is_valid());
+    /// Drop everything belonging to processes that no longer exist.
+    ///
+    /// Without this, a long-running Portix accumulates one L1 entry per dev
+    /// server the user ever started.
+    pub fn retain_live(&mut self, live: &std::collections::HashSet<ProcessKey>) {
+        self.l1_process.retain(|k, _| live.contains(k));
+        self.cpu_samples.retain(|k, _| live.contains(k));
         self.l2_project.retain(|_, e| e.is_valid());
-        self.l3_framework.retain(|_, e| e.is_valid());
         self.l4_users.retain(|_, e| e.is_valid());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a_static(name: &str) -> ProcessStatic {
+        ProcessStatic {
+            name: name.to_string(),
+            ppid: 1,
+            cmdline: vec![name.to_string()],
+            exe: None,
+            cwd: None,
+            started_at: None,
+        }
+    }
+
+    /// The bug this key design exists to prevent: PID 4242 dies, the kernel
+    /// hands 4242 to something else, and the cache shows the dead process's data.
+    #[test]
+    fn test_pid_reuse_does_not_leak_cache() {
+        let mut cache = CacheStore::new();
+        let old = ProcessKey {
+            pid: 4242,
+            starttime_jiffies: 111,
+        };
+        let recycled = ProcessKey {
+            pid: 4242,
+            starttime_jiffies: 999,
+        };
+
+        cache.insert_process(old, a_static("next-dev"));
+
+        assert!(cache.get_process(recycled).is_none());
+        assert_eq!(cache.get_process(old).unwrap().name, "next-dev");
+    }
+
+    #[test]
+    fn test_framework_invalidated_when_manifest_mtime_changes() {
+        let mut cache = CacheStore::new();
+        cache.insert_framework(7, 1000, None);
+
+        assert!(cache.get_framework(7, 1000).is_some());
+        assert!(cache.get_framework(7, 2000).is_none());
+    }
+
+    #[test]
+    fn test_cpu_sample_swap_returns_previous() {
+        let mut cache = CacheStore::new();
+        let key = ProcessKey {
+            pid: 1,
+            starttime_jiffies: 1,
+        };
+
+        assert!(cache
+            .swap_cpu_sample(
+                key,
+                CpuSample {
+                    proc_jiffies: 10,
+                    total_jiffies: 100
+                }
+            )
+            .is_none());
+
+        let prev = cache
+            .swap_cpu_sample(
+                key,
+                CpuSample {
+                    proc_jiffies: 20,
+                    total_jiffies: 200,
+                },
+            )
+            .unwrap();
+        assert_eq!(prev.proc_jiffies, 10);
+    }
+
+    #[test]
+    fn test_retain_live_evicts_dead_processes() {
+        let mut cache = CacheStore::new();
+        let alive = ProcessKey {
+            pid: 1,
+            starttime_jiffies: 1,
+        };
+        let dead = ProcessKey {
+            pid: 2,
+            starttime_jiffies: 2,
+        };
+        cache.insert_process(alive, a_static("alive"));
+        cache.insert_process(dead, a_static("dead"));
+
+        let live = std::collections::HashSet::from([alive]);
+        cache.retain_live(&live);
+
+        assert!(cache.get_process(alive).is_some());
+        assert!(cache.get_process(dead).is_none());
     }
 }

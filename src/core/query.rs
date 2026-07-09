@@ -1,4 +1,4 @@
-use crate::model::{Service, Snapshot};
+use crate::model::Service;
 use nucleo_matcher::{pattern::Pattern, Config, Matcher, Utf32Str};
 
 /// Fuzzy search over services.
@@ -6,6 +6,12 @@ pub struct Query {
     matcher: Matcher,
     pattern: Option<Pattern>,
     query_string: String,
+}
+
+impl Default for Query {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Query {
@@ -57,7 +63,7 @@ impl Query {
                 }
 
                 // Sort by score (higher is better)
-                scored.sort_by(|a, b| b.0.cmp(&a.0));
+                scored.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
                 scored.into_iter().map(|(_, idx, service)| (idx, service)).collect()
             }
         }

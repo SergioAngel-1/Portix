@@ -62,10 +62,10 @@ pub fn render(f: &mut Frame, area: Rect, snapshot: &Snapshot, search_active: boo
     }
 
     // Degradations
-    if !snapshot.degredations.is_empty() {
+    if !snapshot.degradations.is_empty() {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            format!("⚠ {}", snapshot.degredations.len()),
+            format!("⚠ {}", snapshot.degradations.len()),
             Style::default().fg(Color::Yellow),
         ));
     }

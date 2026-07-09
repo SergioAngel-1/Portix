@@ -1,64 +1,77 @@
 use crate::model::Signal;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use std::path::Path;
 
-/// Send a signal to a process.
-/// This is a safe wrapper around the signal system call.
-pub fn send_signal(pid: i32, sig: Signal) -> Result<()> {
-    let signal = match sig {
-        Signal::Term => 15, // SIGTERM
-        Signal::Kill => 9,  // SIGKILL
-        Signal::Interrupt => 2, // SIGINT
-    };
-
-    // Use Command to send signal safely
-    let output = std::process::Command::new("kill")
-        .arg(format!("-{}", signal))
-        .arg(pid.to_string())
-        .output()?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(anyhow::anyhow!("Failed to send signal: {}", stderr))
+impl Signal {
+    fn as_libc(self) -> i32 {
+        match self {
+            Signal::Term => libc::SIGTERM,
+            Signal::Kill => libc::SIGKILL,
+            Signal::Interrupt => libc::SIGINT,
+        }
     }
 }
 
-/// Send a signal to a process group.
-pub fn send_signal_to_group(pgid: i32, sig: Signal) -> Result<()> {
-    let signal = match sig {
-        Signal::Term => 15, // SIGTERM
-        Signal::Kill => 9,  // SIGKILL
-        Signal::Interrupt => 2, // SIGINT
-    };
+/// Send a signal to a single process, after proving it is still the process we
+/// meant to signal.
+///
+/// PIDs are recycled. Between the snapshot the user is looking at and the
+/// keystroke that kills, the kernel may have handed this PID to something else.
+/// Re-reading `starttime` and comparing it against the value captured in the
+/// snapshot closes that TOCTOU window for the price of one file read.
+///
+/// We signal the process, never the process group: `kill(-pgid, …)` takes down
+/// every sibling sharing the group, which for a dev server launched from an
+/// interactive shell can include the shell itself.
+pub fn send_signal(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()> {
+    let actual = super::proc::read_starttime_jiffies(proc_root, pid)
+        .ok_or_else(|| anyhow!("process {pid} no longer exists"))?;
 
-    // Use negative PID for process group
-    let output = std::process::Command::new("kill")
-        .arg(format!("-{}", signal))
-        .arg((-pgid).to_string())
-        .output()?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(anyhow::anyhow!("Failed to send signal to group: {}", stderr))
+    if actual != expected_starttime {
+        return Err(anyhow!(
+            "refusing to signal PID {pid}: it was replaced by a different process \
+             (start time {actual} != {expected_starttime})"
+        ));
     }
+
+    // SAFETY: kill(2) with a positive pid and a valid signal number, on a pid we
+    // just verified to be the process we intend to signal.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::kill(pid, sig.as_libc()) };
+
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
-/// Get the process group ID for a PID.
-pub fn get_pgid(pid: i32) -> Result<i32> {
-    let output = std::process::Command::new("ps")
-        .arg("-o")
-        .arg("pgid=")
-        .arg("-p")
-        .arg(pid.to_string())
-        .output()?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pgid_str = stdout.trim();
+    fn fake_proc(pid: i32, starttime: u64) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stat"), "cpu  1 2 3\nbtime 1700000000\n").unwrap();
+        let pid_dir = dir.path().join(pid.to_string());
+        std::fs::create_dir(&pid_dir).unwrap();
+        let stat =
+            format!("{pid} (svc) S 1 1 1 0 -1 0 0 0 0 0 10 20 0 0 20 0 1 0 {starttime} 0 0");
+        std::fs::write(pid_dir.join("stat"), stat).unwrap();
+        dir
+    }
 
-    pgid_str
-        .parse::<i32>()
-        .map_err(|e| anyhow::anyhow!("Failed to parse PGID: {}", e))
+    #[test]
+    fn test_refuses_to_signal_a_recycled_pid() {
+        // The snapshot saw starttime 111; /proc now reports 222 => different process.
+        let dir = fake_proc(4242, 222);
+        let err = send_signal(dir.path(), 4242, 111, Signal::Term).unwrap_err();
+        assert!(err.to_string().contains("replaced by a different process"));
+    }
+
+    #[test]
+    fn test_refuses_to_signal_a_vanished_process() {
+        let dir = fake_proc(4242, 111);
+        let err = send_signal(dir.path(), 9999, 111, Signal::Term).unwrap_err();
+        assert!(err.to_string().contains("no longer exists"));
+    }
 }

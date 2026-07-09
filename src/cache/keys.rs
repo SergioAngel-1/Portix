@@ -1,18 +1,18 @@
-/// Stable cache keys based on inodes, not paths.
-///
-/// Using inodes instead of paths ensures:
-/// - A `git mv` or rename doesn't invalidate the cache
-/// - No stale entries when a directory name is reused
+//! Stable cache keys based on inodes, not paths.
+//!
+//! Using inodes instead of paths ensures:
+//! - A `git mv` or rename doesn't invalidate the cache
+//! - No stale entries when a directory name is reused
 
 /// Get the inode for a path.
 pub fn inode(path: &std::path::Path) -> Option<u64> {
     std::fs::metadata(path)
         .ok()
-        .and_then(|m| {
+        .map(|m| {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                Some(m.ino())
+                m.ino()
             }
             #[cfg(not(unix))]
             {

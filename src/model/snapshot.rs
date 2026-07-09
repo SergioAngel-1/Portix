@@ -1,7 +1,7 @@
 use crate::model::Service;
 use serde::Serialize;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Reasons why some data couldn't be obtained.
 #[derive(Debug, Clone, Serialize)]
@@ -43,13 +43,15 @@ impl Degradation {
 pub struct Snapshot {
     /// All detected services
     pub services: Vec<Service>,
-    /// When this snapshot was taken (as epoch seconds)
+    /// Monotonic instant the scan started; not meaningful outside this process.
     #[serde(skip)]
     pub taken_at: Instant,
+    /// Wall-clock time of the scan, for JSON consumers.
+    pub taken_at_epoch_secs: u64,
     /// How long the scan took (as milliseconds)
     pub scan_duration_ms: u64,
     /// Any degraded data
-    pub degredations: Vec<Degradation>,
+    pub degradations: Vec<Degradation>,
 }
 
 impl Snapshot {
@@ -60,38 +62,9 @@ impl Snapshot {
         services
     }
 
-    /// Get services matching a filter.
-    pub fn filtered(&self, query: &str) -> Vec<&Service> {
-        let query_lower = query.to_lowercase();
-        self.services
-            .iter()
-            .filter(|s| {
-                // Search in port, project name, framework, command, PID
-                let port_match = s.socket.port.to_string().contains(&query_lower);
-                let project_match = s
-                    .project
-                    .as_ref()
-                    .map(|p| p.display_name().to_lowercase().contains(&query_lower))
-                    .unwrap_or(false);
-                let framework_match = s
-                    .framework
-                    .as_ref()
-                    .map(|f| f.display_name.to_lowercase().contains(&query_lower))
-                    .unwrap_or(false);
-                let cmd_match = s
-                    .process
-                    .as_ref()
-                    .map(|p| p.command_display().to_lowercase().contains(&query_lower))
-                    .unwrap_or(false);
-                let pid_match = s
-                    .process
-                    .as_ref()
-                    .map(|p| p.pid.to_string().contains(&query_lower))
-                    .unwrap_or(false);
-
-                port_match || project_match || framework_match || cmd_match || pid_match
-            })
-            .collect()
+    /// Look up the service listening on a port, if any.
+    pub fn by_port(&self, port: u16) -> Option<&Service> {
+        self.services.iter().find(|s| s.socket.port == port)
     }
 }
 

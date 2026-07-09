@@ -21,23 +21,14 @@ pub fn list_pids(proc_root: &Path) -> Result<Vec<i32>> {
 pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
     let pid_dir = proc_root.join(pid.to_string());
 
-    // Read cmdline
+    // A process can vanish between readdir and open. Its stat file is the one
+    // read we cannot degrade past: without starttime there is no safe identity.
+    let stat = read_stat(proc_root, &pid_dir).context("process disappeared")?;
+
     let cmdline = read_cmdline(&pid_dir).unwrap_or_default();
-
-    // Read exe (readlink)
     let exe = read_link_safe(&pid_dir.join("exe")).ok();
-
-    // Read cwd (readlink)
     let cwd = read_link_safe(&pid_dir.join("cwd")).ok();
-
-    // Read status
     let status = read_status(&pid_dir).unwrap_or_default();
-
-    // Read stat
-    let stat = read_stat(&pid_dir).unwrap_or_default();
-
-    // Read cgroup
-    let _cgroup = read_cgroup(&pid_dir).unwrap_or_default();
 
     Ok(Process {
         pid,
@@ -48,8 +39,10 @@ pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
         cwd,
         user: None, // TODO: Resolve uid to username
         started_at: stat.started_at,
+        starttime_jiffies: stat.starttime_jiffies,
+        cpu_jiffies: stat.utime + stat.stime,
         metrics: ProcessMetrics {
-            cpu_percent: None, // Requires delta calculation
+            cpu_percent: None, // Filled in by the engine from two samples
             rss_bytes: status.rss_bytes,
             virt_bytes: status.virt_bytes,
             uptime: None,
@@ -57,6 +50,35 @@ pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
         state: stat.state,
         threads: status.threads,
     })
+}
+
+/// Read only the starttime of a process, for identity re-verification.
+///
+/// Returns `None` if the process is gone. Cheap enough to call right before
+/// sending a signal.
+pub fn read_starttime_jiffies(proc_root: &Path, pid: i32) -> Option<u64> {
+    let pid_dir = proc_root.join(pid.to_string());
+    read_stat(proc_root, &pid_dir).map(|s| s.starttime_jiffies)
+}
+
+/// Read the UID owning a process from /proc/<pid>/status.
+pub fn read_uid(proc_root: &Path, pid: i32) -> Option<u32> {
+    let content = std::fs::read_to_string(proc_root.join(pid.to_string()).join("status")).ok()?;
+    content
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+}
+
+/// Read the UID of the calling process, honoring the injected proc root.
+pub fn current_uid(proc_root: &Path) -> Option<u32> {
+    let content = std::fs::read_to_string(proc_root.join("self").join("status")).ok()?;
+    content
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
 }
 
 /// Read /proc/<pid>/cmdline (null-separated).
@@ -100,7 +122,7 @@ fn read_status(pid_dir: &Path) -> Option<StatusInfo> {
             if let Some(state_char) = value.trim().chars().next() {
                 info.state = ProcessState::from_char(state_char).unwrap_or(ProcessState::Sleeping);
             }
-        } else if let Some(value) = line.strip_prefix("Pid:") {
+        } else if let Some(_value) = line.strip_prefix("Pid:") {
             // We already know the PID
         } else if let Some(value) = line.strip_prefix("PPid:") {
             if let Ok(ppid) = value.trim().parse::<i32>() {
@@ -154,87 +176,115 @@ impl Default for StatusInfo {
 /// Parse /proc/<pid>/stat.
 /// IMPORTANT: The comm field (field 2) can contain spaces and parentheses.
 /// We must parse from the LAST ')' to handle malicious comm values.
-fn read_stat(pid_dir: &Path) -> Option<StatInfo> {
+fn read_stat(proc_root: &Path, pid_dir: &Path) -> Option<StatInfo> {
     let content = std::fs::read_to_string(pid_dir.join("stat")).ok()?;
 
     // Find the last ')' to handle comm fields with spaces/parens
     let last_paren = content.rfind(')')?;
-    let after_comm = &content[last_paren + 2..]; // Skip ") "
+    let after_comm = content.get(last_paren + 2..)?; // Skip ") "
 
     let fields: Vec<&str> = after_comm.split_whitespace().collect();
     if fields.len() < 20 {
         return None;
     }
 
-    // Field 0 (after comm): state (index 0)
+    // Indices are relative to the field after comm: state=0, ppid=1,
+    // utime=11, stime=12, starttime=19.
     let state = fields[0].chars().next().and_then(ProcessState::from_char)?;
-
-    // Field 1: ppid (index 1)
     let ppid = fields[1].parse::<i32>().ok()?;
+    let utime = fields[11].parse::<u64>().ok()?;
+    let stime = fields[12].parse::<u64>().ok()?;
+    let starttime_jiffies = fields[19].parse::<u64>().ok()?;
 
-    // Field 19 (index 19): starttime (jiffies since boot)
-    let starttime = fields[19].parse::<u64>().ok();
-
-    // Get boot time from /proc/stat
-    let btime = std::fs::read_to_string("/proc/stat")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("btime"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|s| s.parse::<u64>().ok())
-        })
-        .unwrap_or(0);
+    let hz = super::metrics::clock_ticks_per_sec();
+    let btime = boot_time_secs(proc_root).unwrap_or(0);
+    let started_at = if btime == 0 {
+        None
+    } else {
+        Some(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(btime + starttime_jiffies / hz),
+        )
+    };
 
     Some(StatInfo {
         ppid,
         state,
-        started_at: starttime.map(|st| {
-            // Convert jiffies to SystemTime
-            // starttime is jiffies since boot, btime is epoch seconds of boot
-            let jiffies_per_sec = 100u64;
-            let process_start_secs = st / jiffies_per_sec;
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(btime + process_start_secs)
-        }),
+        started_at,
+        starttime_jiffies,
+        utime,
+        stime,
     })
+}
+
+/// Boot time in epoch seconds, from the `btime` line of <proc_root>/stat.
+fn boot_time_secs(proc_root: &Path) -> Option<u64> {
+    let content = std::fs::read_to_string(proc_root.join("stat")).ok()?;
+    content
+        .lines()
+        .find(|l| l.starts_with("btime"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
 }
 
 struct StatInfo {
     ppid: i32,
     state: ProcessState,
     started_at: Option<std::time::SystemTime>,
-}
-
-impl Default for StatInfo {
-    fn default() -> Self {
-        Self {
-            ppid: 0,
-            state: ProcessState::Sleeping,
-            started_at: None,
-        }
-    }
-}
-
-/// Read /proc/<pid>/cgroup.
-fn read_cgroup(pid_dir: &Path) -> Option<String> {
-    std::fs::read_to_string(pid_dir.join("cgroup")).ok()
+    starttime_jiffies: u64,
+    utime: u64,
+    stime: u64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Build a fake proc root containing one pid with the given stat content.
+    fn fake_proc(pid: i32, stat: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stat"), "cpu  1 2 3 4\nbtime 1700000000\n").unwrap();
+        let pid_dir = dir.path().join(pid.to_string());
+        std::fs::create_dir(&pid_dir).unwrap();
+        std::fs::write(pid_dir.join("stat"), stat).unwrap();
+        dir
+    }
+
+    /// comm is attacker-controlled: a process named "(evil) 1 2 3" must not
+    /// shift every subsequent field. Parse from the LAST ')'.
+    const HOSTILE_COMM_STAT: &str = "12345 ((evil) 1 2 3) S 12340 12345 12345 34816 12345 0 0 0 0 0 111 222 0 0 20 0 1 0 987654 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+
     #[test]
     fn test_parse_stat_with_parens() {
-        // Process with parentheses in name
-        let content = "12345 ((evil) 1 2 3) S 12340 12345 12345 34816 12345 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
-        let temp_dir = tempfile::tempdir().unwrap();
-        let pid_dir = temp_dir.path().join("12345");
-        std::fs::create_dir(&pid_dir).unwrap();
-        std::fs::write(pid_dir.join("stat"), content).unwrap();
-
-        let stat = read_stat(&pid_dir).unwrap();
+        let dir = fake_proc(12345, HOSTILE_COMM_STAT);
+        let stat = read_stat(dir.path(), &dir.path().join("12345")).unwrap();
         assert_eq!(stat.ppid, 12340);
         assert_eq!(stat.state, ProcessState::Sleeping);
+    }
+
+    #[test]
+    fn test_parse_stat_reads_cpu_times_and_starttime() {
+        let dir = fake_proc(12345, HOSTILE_COMM_STAT);
+        let stat = read_stat(dir.path(), &dir.path().join("12345")).unwrap();
+        assert_eq!(stat.utime, 111);
+        assert_eq!(stat.stime, 222);
+        assert_eq!(stat.starttime_jiffies, 987654);
+    }
+
+    #[test]
+    fn test_boot_time_comes_from_injected_proc_root() {
+        // A hermetic proc root must never fall through to the real /proc.
+        let dir = fake_proc(12345, HOSTILE_COMM_STAT);
+        assert_eq!(boot_time_secs(dir.path()), Some(1_700_000_000));
+
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(boot_time_secs(empty.path()), None);
+    }
+
+    #[test]
+    fn test_read_starttime_of_missing_process_is_none() {
+        let dir = fake_proc(12345, HOSTILE_COMM_STAT);
+        assert_eq!(read_starttime_jiffies(dir.path(), 12345), Some(987654));
+        assert_eq!(read_starttime_jiffies(dir.path(), 999), None);
     }
 }

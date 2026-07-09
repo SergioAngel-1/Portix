@@ -1,5 +1,15 @@
 use serde::Serialize;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+
+/// Transport family of a socket, ignoring the IP version.
+///
+/// A service that binds both `0.0.0.0` and `::` produces two kernel sockets but
+/// is one service; grouping by family is what collapses them into one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum Family {
+    Tcp,
+    Udp,
+}
 
 /// Network protocol of a socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -8,6 +18,19 @@ pub enum Protocol {
     Tcp6,
     Udp,
     Udp6,
+}
+
+impl Protocol {
+    pub fn family(&self) -> Family {
+        match self {
+            Protocol::Tcp | Protocol::Tcp6 => Family::Tcp,
+            Protocol::Udp | Protocol::Udp6 => Family::Udp,
+        }
+    }
+
+    pub fn is_v6(&self) -> bool {
+        matches!(self, Protocol::Tcp6 | Protocol::Udp6)
+    }
 }
 
 impl std::fmt::Display for Protocol {
@@ -105,6 +128,9 @@ pub struct Socket {
     pub bind_scope: BindScope,
     pub inode: u64,
     pub uid: u32,
+    /// True when the same process serves this port over both IPv4 and IPv6.
+    #[serde(default)]
+    pub dual_stack: bool,
 }
 
 impl Socket {
@@ -118,12 +144,25 @@ impl Socket {
         self.state == TcpState::Listen
     }
 
-    /// Check if this socket is a UDP socket with a local port.
-    pub fn is_udp_with_port(&self) -> bool {
-        matches!(self.protocol, Protocol::Udp | Protocol::Udp6)
-            && self.port != 0
-            && self.local_addr == std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-                || self.local_addr == std::net::IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    /// Protocol as shown in the PROTO column, collapsing dual-stack pairs.
+    pub fn proto_display(&self) -> String {
+        if self.dual_stack {
+            match self.protocol.family() {
+                Family::Tcp => "tcp*".to_string(),
+                Family::Udp => "udp*".to_string(),
+            }
+        } else {
+            self.protocol.to_string()
+        }
+    }
+
+    /// True when the port is in the privileged range reserved for system services.
+    pub fn is_system_port(&self) -> bool {
+        self.port < 1024
+    }
+
+    pub fn is_loopback(&self) -> bool {
+        self.bind_scope == BindScope::Loopback
     }
 }
 

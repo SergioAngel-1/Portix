@@ -41,10 +41,7 @@ pub fn render(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
-            Span::raw("  /          search          f   filter"),
-        ]),
-        Line::from(vec![
-            Span::raw("  Esc        cancel          F   clear"),
+            Span::raw("  /          search          Esc cancel"),
         ]),
         Line::raw(""),
         Line::from(Span::styled(
@@ -54,13 +51,16 @@ pub fn render(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
-            Span::raw("  k          kill (SIGTERM)"),
+            Span::raw("  x          kill (SIGTERM)"),
         ]),
         Line::from(vec![
-            Span::raw("  K          force (SIGKILL)"),
+            Span::raw("  X          force kill (SIGKILL)"),
         ]),
         Line::from(vec![
             Span::raw("  o          open in browser"),
+        ]),
+        Line::from(vec![
+            Span::raw("  y          copy URL"),
         ]),
         Line::raw(""),
         Line::from(Span::styled(

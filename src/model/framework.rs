@@ -86,17 +86,17 @@ pub struct Framework {
 impl Framework {
     /// Get the display string for the framework column.
     pub fn display(&self) -> String {
-        let version_str = self
+        let version = self
             .version
             .as_ref()
             .map(|v| format!(" {}", v))
             .unwrap_or_default();
-        let suffix = self.confidence.suffix();
         format!(
-            "{} {}{}",
+            "{} {}{}{}",
             self.confidence.glyph(),
             self.display_name,
-            format!("{}{}", version_str, suffix)
+            version,
+            self.confidence.suffix()
         )
     }
 }

@@ -29,14 +29,14 @@ pub fn score_signals(signals: &[Signal]) -> HashMap<String, f64> {
 
 /// Convert a score to a confidence level.
 pub fn score_to_confidence(score: f64) -> FrameworkConfidence {
+    // Below 0.30 the caller drops the framework entirely, so there is no band
+    // under Low to name.
     if score >= 0.90 {
         FrameworkConfidence::High
     } else if score >= 0.60 {
         FrameworkConfidence::Medium
-    } else if score >= 0.30 {
-        FrameworkConfidence::Low
     } else {
-        FrameworkConfidence::Low // Will be filtered out
+        FrameworkConfidence::Low
     }
 }
 

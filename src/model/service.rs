@@ -47,17 +47,28 @@ impl Service {
     }
 
     /// Get the display name for the FRAMEWORK column.
+    ///
+    /// A process name is not a framework. When detection finds nothing we say
+    /// so; putting `chrome` or `exe` in this column makes the tool look like it
+    /// detected something it did not.
     pub fn framework_display(&self) -> String {
         match &self.framework {
             Some(fw) => fw.display(),
-            None => {
-                if let Some(ref process) = self.process {
-                    process.binary_name().to_string()
-                } else {
-                    "—".to_string()
-                }
-            }
+            None => "—".to_string(),
         }
+    }
+
+    /// Get the display name for the COMMAND column.
+    pub fn command_display(&self) -> String {
+        match &self.process {
+            Some(p) => p.binary_name().to_string(),
+            None => "—".to_string(),
+        }
+    }
+
+    /// Start time of the owning process, for TOCTOU-safe signalling.
+    pub fn starttime(&self) -> Option<u64> {
+        self.process.as_ref().map(|p| p.starttime_jiffies)
     }
 
     /// Check if this service has degraded data.

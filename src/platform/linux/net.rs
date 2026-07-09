@@ -33,23 +33,42 @@ fn read_proc_net(proc_root: &Path, file: &str, protocol: Protocol) -> Result<Vec
     for line in content.lines().skip(1) {
         // Skip header line
         if let Some(socket) = parse_proc_net_line(line, protocol) {
-            // Filter: TCP must be in LISTEN state
-            if matches!(
-                protocol,
-                Protocol::Tcp | Protocol::Tcp6
-            ) && socket.state != TcpState::Listen
-            {
-                continue;
+            if is_serving(&socket, line, protocol) {
+                sockets.push(socket);
             }
-            // Filter: UDP must have a local port
-            if matches!(protocol, Protocol::Udp | Protocol::Udp6) && socket.port == 0 {
-                continue;
-            }
-            sockets.push(socket);
         }
     }
 
     Ok(sockets)
+}
+
+/// Decide whether a parsed socket represents a service *offering* a port.
+///
+/// TCP is easy: only LISTEN. UDP has no connection state, so a socket only
+/// counts when it has a local port and no peer — otherwise every outbound
+/// mDNS/QUIC socket a browser opens shows up as a "service" on an ephemeral
+/// port. See PRD §7.1, trap 5.
+fn is_serving(socket: &Socket, line: &str, protocol: Protocol) -> bool {
+    match protocol.family() {
+        crate::model::Family::Tcp => socket.state == TcpState::Listen,
+        crate::model::Family::Udp => {
+            if socket.port == 0 {
+                return false;
+            }
+            match remote_endpoint(line) {
+                Some((addr_hex, port)) => port == 0 && addr_hex.bytes().all(|b| b == b'0'),
+                None => false,
+            }
+        }
+    }
+}
+
+/// Extract the remote `ADDR:PORT` (field index 2) as (hex_addr, port).
+fn remote_endpoint(line: &str) -> Option<(&str, u16)> {
+    let field = line.split_whitespace().nth(2)?;
+    let (addr_hex, port_hex) = field.rsplit_once(':')?;
+    let port = u16::from_str_radix(port_hex, 16).ok()?;
+    Some((addr_hex, port))
 }
 
 /// Parse a single line from /proc/net/tcp* or /proc/net/udp*.
@@ -125,6 +144,7 @@ pub fn parse_proc_net_line(line: &str, protocol: Protocol) -> Option<Socket> {
         bind_scope,
         inode,
         uid,
+        dual_stack: false,
     })
 }
 
@@ -154,5 +174,46 @@ mod tests {
         let socket = parse_proc_net_line(line, Protocol::Tcp).unwrap();
         assert_eq!(socket.port, 3000);
         assert_eq!(socket.bind_scope, crate::model::BindScope::AllInterfaces);
+    }
+
+    #[test]
+    fn test_parse_ipv6_unspecified_is_not_byte_reversed_across_groups() {
+        // [::]:3000 — every group is zero, so this only checks the shape.
+        let line = "   0: 00000000000000000000000000000000:0BB8 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 486401 1 0000 100 0 0 10 0";
+        let socket = parse_proc_net_line(line, Protocol::Tcp6).unwrap();
+        assert_eq!(socket.port, 3000);
+        assert_eq!(socket.bind_scope, crate::model::BindScope::AllInterfaces);
+    }
+
+    #[test]
+    fn test_parse_ipv6_loopback() {
+        // ::1 — the last u32 group is 0x01000000 in host order.
+        let line = "   0: 00000000000000000000000001000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 486401 1 0000 100 0 0 10 0";
+        let socket = parse_proc_net_line(line, Protocol::Tcp6).unwrap();
+        assert_eq!(socket.local_addr, std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn test_tcp_non_listen_is_not_serving() {
+        // st = 01 (ESTABLISHED)
+        let line = "   0: 0100007F:1F90 0100007F:C000 01 00000000:00000000 00:00000000 00000000  1000        0 486312 1 0000 100 0 0 10 0";
+        let socket = parse_proc_net_line(line, Protocol::Tcp).unwrap();
+        assert!(!is_serving(&socket, line, Protocol::Tcp));
+    }
+
+    #[test]
+    fn test_bound_udp_socket_is_serving() {
+        // Bound, no peer: a real UDP service.
+        let line = "   0: 00000000:14E9 00000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 486312 2 0000 0";
+        let socket = parse_proc_net_line(line, Protocol::Udp).unwrap();
+        assert!(is_serving(&socket, line, Protocol::Udp));
+    }
+
+    #[test]
+    fn test_connected_udp_socket_is_not_serving() {
+        // Peer address set: this is an outbound socket (Chrome mDNS/QUIC), not a service.
+        let line = "   0: 0100007F:C1A3 0800080A:0035 07 00000000:00000000 00:00000000 00000000  1000        0 486313 2 0000 0";
+        let socket = parse_proc_net_line(line, Protocol::Udp).unwrap();
+        assert!(!is_serving(&socket, line, Protocol::Udp));
     }
 }

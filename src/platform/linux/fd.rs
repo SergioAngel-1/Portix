@@ -12,7 +12,6 @@ pub fn build_inode_map(
     current_uid: u32,
 ) -> Result<HashMap<u64, Vec<(i32, i32)>>> {
     let mut map: HashMap<u64, Vec<(i32, i32)>> = HashMap::new();
-    let mut found_count = 0usize;
     let total_interest = interest_inodes.len();
 
     // Read all PIDs
@@ -38,10 +37,7 @@ pub fn build_inode_map(
                                             .to_str()
                                             .and_then(|s| s.parse::<i32>().ok())
                                             .unwrap_or(0);
-                                        map.entry(inode)
-                                            .or_insert_with(Vec::new)
-                                            .push((pid, fd_num));
-                                        found_count += 1;
+                                        map.entry(inode).or_default().push((pid, fd_num));
                                     }
                                 }
                             }
@@ -51,8 +47,11 @@ pub fn build_inode_map(
             }
         }
 
-        // Early termination if we found all inodes
-        if found_count >= total_interest {
+        // Stop once every inode we care about has an owner. Count distinct
+        // inodes, not hits: one socket can be held by several fds (dup, forked
+        // workers under SO_REUSEPORT), and counting hits stops the scan early
+        // with inodes still unresolved.
+        if map.len() >= total_interest {
             break;
         }
     }
@@ -108,5 +107,33 @@ mod tests {
         let map = build_inode_map(proc_root, &interest, 1000).unwrap();
         assert!(map.contains_key(&486312));
         assert_eq!(map[&486312][0].0, 1234);
+    }
+
+    /// One process holding the same socket on two fds must not convince the
+    /// scan it has resolved two inodes and stop early.
+    #[test]
+    fn test_duplicate_fds_do_not_end_the_scan_early() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let proc_root = temp_dir.path();
+
+        for (pid, inode, fds) in [(1, 100u64, vec!["3", "4"]), (2, 200u64, vec!["5"])] {
+            let pid_dir = proc_root.join(pid.to_string());
+            let fd_dir = pid_dir.join("fd");
+            std::fs::create_dir_all(&fd_dir).unwrap();
+            std::fs::write(
+                pid_dir.join("status"),
+                "Name:\tsvc\nUid:\t1000\t1000\t1000\t1000\n",
+            )
+            .unwrap();
+            for fd in fds {
+                std::os::unix::fs::symlink(format!("socket:[{inode}]"), fd_dir.join(fd)).unwrap();
+            }
+        }
+
+        let interest = HashSet::from([100, 200]);
+        let map = build_inode_map(proc_root, &interest, 1000).unwrap();
+
+        assert!(map.contains_key(&100), "inode 100 missing");
+        assert!(map.contains_key(&200), "scan stopped before reaching pid 2");
     }
 }
