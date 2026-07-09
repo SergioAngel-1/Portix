@@ -175,18 +175,20 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
 
     // Phase 3: Derive project name
     let name = derive_project_name(&root, workspace_root.as_deref());
+    let technical_name = read_package_name(&root);
+    let language = detect_language(&root);
 
     Some(Project {
         root,
         workspace_root,
         name,
-        technical_name: None, // TODO: Read from manifest
-        language: None,       // TODO: Detect from manifest/process
+        technical_name,
+        language,
         package_manager,
     })
 }
 
-/// Derive a display name for the project.
+/// Derive a display name for the project, with workspace context.
 fn derive_project_name(root: &Path, workspace_root: Option<&Path>) -> String {
     // Try to read package name from manifest
     if let Some(name) = read_package_name(root) {
@@ -274,6 +276,51 @@ fn read_package_name(root: &Path) -> Option<String> {
     None
 }
 
+/// Detect the programming language from the manifest files present at root.
+fn detect_language(root: &Path) -> Option<String> {
+    // Check in priority order, consulting the same PACKAGE_MARKERS files.
+    if root.join("Cargo.toml").exists() {
+        return Some("Rust".to_string());
+    }
+    if root.join("go.mod").exists() {
+        return Some("Go".to_string());
+    }
+    if root.join("package.json").exists()
+        || root.join("deno.json").exists()
+        || root.join("deno.jsonc").exists()
+        || root.join("bunfig.toml").exists()
+    {
+        return Some("JavaScript".to_string());
+    }
+    if root.join("pyproject.toml").exists()
+        || root.join("setup.py").exists()
+        || root.join("setup.cfg").exists()
+        || root.join("requirements.txt").exists()
+        || root.join("Pipfile").exists()
+    {
+        return Some("Python".to_string());
+    }
+    if root.join("Gemfile").exists() {
+        return Some("Ruby".to_string());
+    }
+    if root.join("composer.json").exists() {
+        return Some("PHP".to_string());
+    }
+    if root.join("mix.exs").exists() {
+        return Some("Elixir".to_string());
+    }
+    if root.join("pubspec.yaml").exists() {
+        return Some("Dart".to_string());
+    }
+    if root.join("pom.xml").exists()
+        || root.join("build.gradle").exists()
+        || root.join("build.gradle.kts").exists()
+    {
+        return Some("Java".to_string());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +384,33 @@ mod tests {
     fn test_no_manifest_yields_no_project() {
         let dir = tempfile::tempdir().unwrap();
         assert!(detect_project(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_language_detected_from_cargo_toml() {
+        let dir = project(&[("Cargo.toml", "[package]\nname = \"portix\"\n")]);
+        let project = detect_project(dir.path()).unwrap();
+        assert_eq!(project.language.as_deref(), Some("Rust"));
+    }
+
+    #[test]
+    fn test_language_detected_from_package_json() {
+        let dir = project(&[("package.json", "{}")]);
+        let project = detect_project(dir.path()).unwrap();
+        assert_eq!(project.language.as_deref(), Some("JavaScript"));
+    }
+
+    #[test]
+    fn test_technical_name_set_from_manifest() {
+        let dir = project(&[("package.json", r#"{"name":"@acme/web"}"#)]);
+        let project = detect_project(dir.path()).unwrap();
+        assert_eq!(project.technical_name.as_deref(), Some("@acme/web"));
+    }
+
+    #[test]
+    fn test_technical_name_none_when_no_manifest_name() {
+        let dir = project(&[("Cargo.toml", "[package]\n")]);
+        let project = detect_project(dir.path()).unwrap();
+        assert!(project.technical_name.is_none());
     }
 }

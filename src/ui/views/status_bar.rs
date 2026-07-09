@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+const HELP_INDICATOR: &str = " ? for help";
+
 /// Render the status bar at the bottom.
 pub fn render(
     f: &mut Frame,
@@ -87,6 +89,21 @@ pub fn render(
             Style::default().fg(Color::Yellow),
         ));
     }
+
+    // Right-aligned help indicator.
+    // Compute consumed width from the left-aligned spans, then pad.
+    let left_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    let left_width = left_text.len();
+    let area_width = area.width as usize;
+    let help_width = HELP_INDICATOR.len();
+    let padding = area_width.saturating_sub(left_width + help_width + 1);
+    if padding > 0 {
+        spans.push(Span::raw(" ".repeat(padding)));
+    }
+    spans.push(Span::styled(
+        HELP_INDICATOR,
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let line = Line::from(spans);
 

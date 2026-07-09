@@ -1,5 +1,6 @@
 use crate::model::{Process, ProcessMetrics, ProcessState};
 use anyhow::{Context, Result};
+use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
 /// List all PIDs visible to the current user.
@@ -29,6 +30,10 @@ pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
     let exe = read_link_safe(&pid_dir.join("exe")).ok();
     let cwd = read_link_safe(&pid_dir.join("cwd")).ok();
     let status = read_status(&pid_dir).unwrap_or_default();
+    let user = match status.uid {
+        Some(uid) => uid_to_username(uid),
+        None => None,
+    };
 
     Ok(Process {
         pid,
@@ -37,7 +42,7 @@ pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
         cmdline,
         exe,
         cwd,
-        user: None, // TODO: Resolve uid to username
+        user,
         started_at: stat.started_at,
         starttime_jiffies: stat.starttime_jiffies,
         cpu_jiffies: stat.utime + stat.stime,
@@ -153,6 +158,11 @@ fn read_status(pid_dir: &Path) -> Option<StatusInfo> {
                     info.virt_bytes = Some(kb * 1024);
                 }
             }
+        } else if let Some(value) = line.strip_prefix("Uid:") {
+            // Format: "Uid:\t1000\t1000\t1000\t1000"
+            if let Some(first) = value.split_whitespace().next() {
+                info.uid = first.parse::<u32>().ok();
+            }
         } else if let Some(value) = line.strip_prefix("Threads:") {
             if let Ok(threads) = value.trim().parse::<u32>() {
                 info.threads = threads;
@@ -169,6 +179,7 @@ struct StatusInfo {
     state: ProcessState,
     rss_bytes: Option<u64>,
     virt_bytes: Option<u64>,
+    uid: Option<u32>,
     threads: u32,
 }
 
@@ -180,6 +191,7 @@ impl Default for StatusInfo {
             state: ProcessState::Sleeping,
             rss_bytes: None,
             virt_bytes: None,
+            uid: None,
             threads: 0,
         }
     }
@@ -243,6 +255,44 @@ struct StatInfo {
     starttime_jiffies: u64,
     utime: u64,
     stime: u64,
+}
+
+/// Resolve a numeric UID to a username via the POSIX `getpwuid_r` API.
+///
+/// The buffer is sized at 4 KiB, which covers every username in active use
+/// (Linux caps user names at 32 bytes; even NIS/LDAP entries fit comfortably).
+/// A too-small buffer returns None and the caller degrades gracefully.
+fn uid_to_username(uid: u32) -> Option<String> {
+    let buf_size = 4096;
+    let mut buf = vec![0u8; buf_size];
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+    #[allow(unsafe_code)]
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr() as *mut i8,
+            buf_size,
+            &mut result,
+        )
+    };
+
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+
+    #[allow(unsafe_code)]
+    let pw = unsafe { &*result };
+
+    if pw.pw_name.is_null() {
+        return None;
+    }
+
+    #[allow(unsafe_code)]
+    let name = unsafe { CStr::from_ptr(pw.pw_name) };
+    name.to_str().ok().map(|s| s.to_string())
 }
 
 #[cfg(test)]

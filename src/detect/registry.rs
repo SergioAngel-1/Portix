@@ -52,6 +52,43 @@ fn conventional_port(port: u16) -> Option<&'static str> {
     }
 }
 
+/// Map framework_id → the dep key used in package.json for version lookup.
+const NODE_DEP_KEY: &[(&str, &str)] = &[
+    ("nextjs", "next"),
+    ("vite", "vite"),
+    ("astro", "astro"),
+    ("nuxt", "nuxt"),
+    ("remix", "@remix-run/node"),
+    ("nestjs", "@nestjs/core"),
+    ("express", "express"),
+];
+
+/// Resolve the version of a detected framework from manifest dependencies.
+fn resolve_version(root: Option<&Path>, framework_id: &str) -> Option<String> {
+    let root = root?;
+    let content = std::fs::read_to_string(root.join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let dep_key = NODE_DEP_KEY
+        .iter()
+        .find(|(id, _)| *id == framework_id)
+        .map(|(_, key)| *key)?;
+
+    // Check both dependencies and devDependencies
+    let value = json
+        .get("dependencies")
+        .and_then(|d| d.get(dep_key))
+        .or_else(|| json.get("devDependencies").and_then(|d| d.get(dep_key)))?;
+
+    let version_str = value.as_str()?;
+    // Strip semver prefix (^ ~ >=) for display
+    Some(
+        version_str
+            .trim_start_matches(['^', '~', '>', '=', '<', ' '])
+            .to_string(),
+    )
+}
+
 /// Is `arg` an ASGI app target like `app:app` or `pkg.main:app` — a Python
 /// module path and an attribute, separated by a single colon?
 ///
@@ -178,11 +215,12 @@ impl DetectorRegistry {
             .collect();
 
         let confidence = crate::detect::scoring::score_to_confidence(best_score);
+        let version = resolve_version(cwd, display_id);
 
         Some(Framework {
             id: display_id.to_string(),
             display_name: framework_display_name(display_id),
-            version: None,
+            version,
             language: framework_language(display_id),
             confidence,
             matched_signals: framework_signals
@@ -529,5 +567,53 @@ mod tests {
         assert!(DetectorRegistry::new()
             .detect(Some(dir.path()), Some(&exe), &cmdline, 22)
             .is_none());
+    }
+
+    #[test]
+    fn test_framework_version_read_from_dependencies() {
+        let dir = project(&[(
+            "package.json",
+            r#"{"dependencies":{"next":"^15.1.0"}}"#,
+        )]);
+        let cmdline: Vec<String> = ["node", "/w/node_modules/.bin/next", "dev"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let exe = PathBuf::from("/usr/bin/node");
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 3000)
+            .unwrap();
+        assert_eq!(fw.id, "nextjs");
+        assert_eq!(fw.version.as_deref(), Some("15.1.0"));
+    }
+
+    #[test]
+    fn test_framework_version_from_dev_deps() {
+        let dir = project(&[(
+            "package.json",
+            r#"{"devDependencies":{"vite":"5.4.2"}}"#,
+        )]);
+        let cmdline: Vec<String> = ["node", "/w/node_modules/.bin/vite"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let exe = PathBuf::from("/usr/bin/node");
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 5173)
+            .unwrap();
+        assert_eq!(fw.id, "vite");
+        assert_eq!(fw.version.as_deref(), Some("5.4.2"));
+    }
+
+    #[test]
+    fn test_framework_no_version_for_non_node() {
+        let dir = project(&[("app.py", "from flask import Flask\napp = Flask(__name__)\n")]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline = vec!["python".to_string(), "app.py".to_string()];
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 5000)
+            .unwrap();
+        assert_eq!(fw.id, "flask");
+        assert!(fw.version.is_none());
     }
 }

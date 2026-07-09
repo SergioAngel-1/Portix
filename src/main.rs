@@ -198,7 +198,7 @@ fn print_json(engine: &mut Engine, port: Option<u16>) -> Result<i32> {
 }
 
 fn print_port(engine: &mut Engine, port: u16) -> Result<i32> {
-    let snapshot = engine.scan()?;
+    let snapshot = scan_with_cpu(engine)?;
     let Some(service) = snapshot.by_port(port) else {
         eprintln!("No service listening on port {port}");
         return Ok(exit::NO_MATCH);
@@ -259,7 +259,7 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
 }
 
 fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i32> {
-    let snapshot = engine.scan()?;
+    let snapshot = scan_with_cpu(engine)?;
     let Some(service) = snapshot.by_port(port) else {
         eprintln!("No service listening on port {port}");
         return Ok(exit::NO_MATCH);
