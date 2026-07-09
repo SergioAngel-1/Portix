@@ -24,15 +24,9 @@ pub fn render(f: &mut Frame, area: Rect) {
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(vec![
-            Span::raw("  ↑ k        up              g   first"),
-        ]),
-        Line::from(vec![
-            Span::raw("  ↓ j        down            G   last"),
-        ]),
-        Line::from(vec![
-            Span::raw("  Enter l    details         h   close"),
-        ]),
+        Line::from(vec![Span::raw("  ↑ k        up              g   first")]),
+        Line::from(vec![Span::raw("  ↓ j        down            G   last")]),
+        Line::from(vec![Span::raw("  Enter l    details         h   close")]),
         Line::raw(""),
         Line::from(Span::styled(
             "SEARCH & FILTER",
@@ -40,9 +34,7 @@ pub fn render(f: &mut Frame, area: Rect) {
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(vec![
-            Span::raw("  /          search          Esc cancel"),
-        ]),
+        Line::from(vec![Span::raw("  /          search          Esc cancel")]),
         Line::raw(""),
         Line::from(Span::styled(
             "ACTIONS",
@@ -50,18 +42,10 @@ pub fn render(f: &mut Frame, area: Rect) {
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(vec![
-            Span::raw("  x          kill (SIGTERM)"),
-        ]),
-        Line::from(vec![
-            Span::raw("  X          force kill (SIGKILL)"),
-        ]),
-        Line::from(vec![
-            Span::raw("  o          open in browser"),
-        ]),
-        Line::from(vec![
-            Span::raw("  y          copy URL"),
-        ]),
+        Line::from(vec![Span::raw("  x          kill (SIGTERM)")]),
+        Line::from(vec![Span::raw("  X          force kill (SIGKILL)")]),
+        Line::from(vec![Span::raw("  o          open in browser")]),
+        Line::from(vec![Span::raw("  y          copy URL")]),
         Line::raw(""),
         Line::from(Span::styled(
             "GENERAL",
@@ -69,16 +53,10 @@ pub fn render(f: &mut Frame, area: Rect) {
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(vec![
-            Span::raw("  r          refresh         q   quit"),
-        ]),
-        Line::from(vec![
-            Span::raw("  ?          this help"),
-        ]),
+        Line::from(vec![Span::raw("  r          refresh         q   quit")]),
+        Line::from(vec![Span::raw("  ?          this help")]),
         Line::raw(""),
-        Line::from(vec![
-            Span::raw("              Esc or ? to close"),
-        ]),
+        Line::from(vec![Span::raw("              Esc or ? to close")]),
     ];
 
     let block = Block::default()

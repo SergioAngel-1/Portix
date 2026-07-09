@@ -1,6 +1,8 @@
+#![forbid(unsafe_code)]
+
 pub mod project;
-pub mod signals;
-pub mod scoring;
 pub mod registry;
+pub mod scoring;
+pub mod signals;
 
 pub use registry::*;

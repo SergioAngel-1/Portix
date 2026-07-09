@@ -105,7 +105,10 @@ impl Framework {
 #[derive(Debug, Clone)]
 pub enum FrameworkRelation {
     /// If both score high, show only the supersedes one
-    Supersedes { supersedes: String, superseded: String },
+    Supersedes {
+        supersedes: String,
+        superseded: String,
+    },
     /// Show the implies one as suffix
     Implies { primary: String, secondary: String },
 }

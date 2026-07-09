@@ -30,10 +30,7 @@ pub fn render(f: &mut Frame, area: Rect, service: &Service) {
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(
-                " {}",
-                framework.version.as_deref().unwrap_or("")
-            )),
+            Span::raw(format!(" {}", framework.version.as_deref().unwrap_or(""))),
         ]));
     }
 
@@ -126,7 +123,10 @@ pub fn render(f: &mut Frame, area: Rect, service: &Service) {
     )));
     lines.push(Line::from(vec![
         Span::styled("  Listen   ", Style::default().fg(Color::Gray)),
-        Span::raw(format!("[::]:{} ({})", service.socket.port, service.socket.protocol)),
+        Span::raw(format!(
+            "[::]:{} ({})",
+            service.socket.port, service.socket.protocol
+        )),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Scope    ", Style::default().fg(Color::Gray)),

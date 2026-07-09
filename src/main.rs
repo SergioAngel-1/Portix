@@ -372,8 +372,8 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
         Effect::Quit => return ControlFlow::Quit,
 
         Effect::OpenBrowser(url) => {
-            if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
-                app.error = Some(format!("xdg-open failed: {e}"));
+            if let Err(e) = portix_lib::core::actions::open_url(&url) {
+                app.error = Some(e.to_string());
             }
         }
 
@@ -423,12 +423,17 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
         chunks[1],
         &app.snapshot,
         !app.query.query().is_empty(),
+        app.error.as_deref(),
     );
 
     if app.mode == Mode::Search {
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3), Constraint::Length(1)])
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ])
             .split(f.area());
         portix_lib::ui::views::search_bar::render(
             f,

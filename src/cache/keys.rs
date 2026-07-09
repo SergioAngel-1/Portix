@@ -6,19 +6,17 @@
 
 /// Get the inode for a path.
 pub fn inode(path: &std::path::Path) -> Option<u64> {
-    std::fs::metadata(path)
-        .ok()
-        .map(|m| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                m.ino()
-            }
-            #[cfg(not(unix))]
-            {
-                None
-            }
-        })
+    std::fs::metadata(path).ok().map(|m| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            m.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    })
 }
 
 /// Get the modification time as a u64 for cache invalidation.

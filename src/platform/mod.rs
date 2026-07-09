@@ -77,13 +77,9 @@ impl PlatformProbe for LinuxProbe {
 
     fn current_uid(&self) -> u32 {
         // Falls back to the real uid when the proc root is synthetic and has no
-        // `self/` entry, which is the normal case in tests.
-        linux::proc::current_uid(&self.proc_root).unwrap_or_else(|| {
-            #[allow(unsafe_code)]
-            unsafe {
-                libc::getuid()
-            }
-        })
+        // `self/` entry, which is the normal case in tests. The syscall (and its
+        // `unsafe`) lives in `platform::linux`, never here.
+        linux::proc::current_uid(&self.proc_root).unwrap_or_else(linux::proc::real_uid)
     }
 
     fn total_jiffies(&self) -> Option<u64> {

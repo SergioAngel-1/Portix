@@ -51,7 +51,9 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, signal: Sign
 
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(lines).block(block).alignment(Alignment::Left),
+        Paragraph::new(lines)
+            .block(block)
+            .alignment(Alignment::Left),
         area,
     );
 }

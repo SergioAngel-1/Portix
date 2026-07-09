@@ -128,7 +128,10 @@ impl App {
             },
 
             Mode::Help => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')) {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+                ) {
                     self.mode = Mode::Normal;
                 }
             }

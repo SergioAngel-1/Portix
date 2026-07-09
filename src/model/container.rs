@@ -44,7 +44,11 @@ impl Container {
     pub fn display(&self) -> String {
         match &self.name {
             Some(name) => format!("{} {}", self.runtime.glyph(), name),
-            None => format!("{} {}", self.runtime.glyph(), &self.id[..12.min(self.id.len())]),
+            None => format!(
+                "{} {}",
+                self.runtime.glyph(),
+                &self.id[..12.min(self.id.len())]
+            ),
         }
     }
 }

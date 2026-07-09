@@ -316,7 +316,10 @@ mod tests {
     #[test]
     fn test_go_module_name_is_last_path_component() {
         let dir = project(&[("go.mod", "module github.com/acme/ml-scoring\n")]);
-        assert_eq!(read_package_name(dir.path()), Some("ml-scoring".to_string()));
+        assert_eq!(
+            read_package_name(dir.path()),
+            Some("ml-scoring".to_string())
+        );
     }
 
     #[test]

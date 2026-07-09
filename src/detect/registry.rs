@@ -25,8 +25,14 @@ const NODE_DEPENDENCIES: &[(&str, &str)] = &[
 
 /// (framework id, files whose presence implies it)
 const PROJECT_FILES: &[(&str, &[&str])] = &[
-    ("nextjs", &["next.config.js", "next.config.ts", "next.config.mjs"]),
-    ("vite", &["vite.config.js", "vite.config.ts", "vite.config.mjs"]),
+    (
+        "nextjs",
+        &["next.config.js", "next.config.ts", "next.config.mjs"],
+    ),
+    (
+        "vite",
+        &["vite.config.js", "vite.config.ts", "vite.config.mjs"],
+    ),
     ("astro", &["astro.config.mjs", "astro.config.ts"]),
     ("nuxt", &["nuxt.config.ts", "nuxt.config.js"]),
     ("nestjs", &["nest-cli.json"]),
@@ -43,6 +49,34 @@ fn conventional_port(port: u16) -> Option<&'static str> {
         4321 => Some("astro"),
         8000 => Some("django"),
         _ => None,
+    }
+}
+
+/// Is `arg` an ASGI app target like `app:app` or `pkg.main:app` — a Python
+/// module path and an attribute, separated by a single colon?
+///
+/// Requires a letter on each side so it can't fire on `0.0.0.0:8000` or `[::]`.
+fn is_asgi_app_target(arg: &str) -> bool {
+    let Some((module, attr)) = arg.split_once(':') else {
+        return false;
+    };
+    let is_ident = |s: &str, dot_ok: bool| {
+        !s.is_empty()
+            && s.chars().any(|c| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || (dot_ok && c == '.'))
+    };
+    is_ident(module, true) && is_ident(attr, false)
+}
+
+/// Does `root/app.py` exist and construct a Flask app (`Flask(`)?
+fn flask_app_py(root: &Path) -> bool {
+    let app_py = root.join("app.py");
+    match std::fs::metadata(&app_py) {
+        Ok(meta) if meta.len() <= 256 * 1024 => std::fs::read_to_string(&app_py)
+            .map(|c| c.contains("Flask("))
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -64,7 +98,10 @@ fn read_dependencies(root: &Path) -> Option<serde_json::Map<String, serde_json::
 #[derive(Debug, Clone)]
 pub enum Relation {
     /// If both score high, show only the supersedes one
-    Supersedes { supersedes: String, superseded: String },
+    Supersedes {
+        supersedes: String,
+        superseded: String,
+    },
     /// Show the implies one as suffix
     Implies { primary: String, secondary: String },
 }
@@ -148,7 +185,10 @@ impl DetectorRegistry {
             version: None,
             language: framework_language(display_id),
             confidence,
-            matched_signals: framework_signals.iter().map(|s| s.evidence.clone()).collect(),
+            matched_signals: framework_signals
+                .iter()
+                .map(|s| s.evidence.clone())
+                .collect(),
         })
     }
 
@@ -197,10 +237,28 @@ impl DetectorRegistry {
         }
 
         if cmdline_str.contains("-m uvicorn") || cmdline_str.contains("uvicorn ") {
-            signals.push(Signal::new("uvicorn", kinds::CMDLINE_MODULE, "cmdline:uvicorn"));
+            // `uvicorn app:app` — an ASGI app target — is the canonical FastAPI
+            // dev command. A bare uvicorn with no target is the weaker fallback.
+            if cmdline.iter().any(|arg| is_asgi_app_target(arg)) {
+                signals.push(Signal::new(
+                    "fastapi",
+                    kinds::CMDLINE_MODULE,
+                    "cmdline:uvicorn asgi-app",
+                ));
+            } else {
+                signals.push(Signal::new(
+                    "uvicorn",
+                    kinds::CMDLINE_MODULE,
+                    "cmdline:uvicorn",
+                ));
+            }
         }
         if cmdline_str.contains("gunicorn") {
-            signals.push(Signal::new("gunicorn", kinds::CMDLINE_BINARY, "cmdline:gunicorn"));
+            signals.push(Signal::new(
+                "gunicorn",
+                kinds::CMDLINE_BINARY,
+                "cmdline:gunicorn",
+            ));
         }
         if cmdline_str.contains("manage.py") && cmdline_str.contains("runserver") {
             signals.push(Signal::new(
@@ -227,6 +285,17 @@ impl DetectorRegistry {
             }
         }
 
+        // Flask is commonly run as `python app.py`, whose cmdline carries no
+        // "flask". The tell is an app.py that constructs a Flask app. Guard the
+        // read: a project file could be arbitrarily large.
+        if !signals.iter().any(|s| s.framework_id == "flask") && flask_app_py(root) {
+            signals.push(Signal::new(
+                "flask",
+                kinds::PROJECT_FILE,
+                "file:app.py Flask(",
+            ));
+        }
+
         // A declared dependency is the strongest evidence short of the binary.
         if let Some(deps) = read_dependencies(root) {
             for (id, dep) in NODE_DEPENDENCIES {
@@ -251,7 +320,11 @@ impl DetectorRegistry {
     }
 
     /// Resolve supersedes relationships.
-    fn resolve_supersedes<'a>(&'a self, best_id: &'a str, scores: &std::collections::HashMap<String, f64>) -> &'a str {
+    fn resolve_supersedes<'a>(
+        &'a self,
+        best_id: &'a str,
+        scores: &std::collections::HashMap<String, f64>,
+    ) -> &'a str {
         for relation in &self.relations {
             if let Relation::Supersedes {
                 supersedes,
@@ -402,6 +475,50 @@ mod tests {
             .detect(Some(dir.path()), Some(&exe), &cmdline, 8777)
             .unwrap();
         assert_eq!(fw.id, "python");
+    }
+
+    /// `uvicorn app:app --reload` is the canonical FastAPI dev command.
+    #[test]
+    fn test_uvicorn_app_target_is_fastapi() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline: Vec<String> = ["python", "-m", "uvicorn", "app:app", "--reload"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 8000)
+            .unwrap();
+        assert_eq!(fw.id, "fastapi");
+    }
+
+    /// A bare uvicorn with no app target stays generic, and a host:port arg must
+    /// not be mistaken for an ASGI target.
+    #[test]
+    fn test_bare_uvicorn_is_not_fastapi() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline: Vec<String> = ["python", "-m", "uvicorn", "--host", "0.0.0.0:8000"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 8000)
+            .unwrap();
+        assert_eq!(fw.id, "uvicorn");
+    }
+
+    /// Flask run as `python app.py` has no "flask" in its cmdline; the app.py
+    /// content is the only tell.
+    #[test]
+    fn test_flask_detected_from_app_py_contents() {
+        let dir = project(&[("app.py", "from flask import Flask\napp = Flask(__name__)\n")]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline = vec!["python".to_string(), "app.py".to_string()];
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 5000)
+            .unwrap();
+        assert_eq!(fw.id, "flask");
     }
 
     #[test]

@@ -12,14 +12,16 @@ use crate::model::Service;
 use anyhow::{anyhow, Context, Result};
 use std::process::Command;
 
-/// Open a service URL in the default browser.
-pub fn open_in_browser(service: &Service) -> Result<()> {
-    let url = service.socket.url();
-
+/// Open a URL in the default browser.
+///
+/// The single outbound action Portix performs. Invoked argv-style — never
+/// `sh -c` — so a URL derived from attacker-controlled text cannot be a shell
+/// injection. Callers pass a `localhost` URL built by `Socket::url`.
+pub fn open_url(url: &str) -> Result<()> {
     Command::new("xdg-open")
-        .arg(&url)
+        .arg(url)
         .spawn()
-        .with_context(|| format!("Failed to open {}", url))?;
+        .with_context(|| format!("Failed to open {url}"))?;
 
     Ok(())
 }
@@ -42,7 +44,9 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
         return Ok(());
     }
 
-    Err(anyhow!("No clipboard tool found (install wl-copy or xclip)"))
+    Err(anyhow!(
+        "No clipboard tool found (install wl-copy or xclip)"
+    ))
 }
 
 /// Get the URL for a service.

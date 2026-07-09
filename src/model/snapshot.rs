@@ -14,13 +14,18 @@ pub enum Degradation {
     ProjectDetectionFailed(usize),
     /// Network namespace scanning unavailable
     NetnsUnavailable,
+    /// The scan itself failed before any socket could be listed.
+    ScanFailed(String),
 }
 
 impl Degradation {
     pub fn message(&self) -> String {
         match self {
             Degradation::SocketsWithoutPid(n) => {
-                format!("{} sockets belong to other users. Run with sudo to see them.", n)
+                format!(
+                    "{} sockets belong to other users. Run with sudo to see them.",
+                    n
+                )
             }
             Degradation::ProcessesPartialRead(n) => {
                 format!("{} processes couldn't be fully read.", n)
@@ -31,6 +36,7 @@ impl Degradation {
             Degradation::NetnsUnavailable => {
                 "Network namespace scanning unavailable. Containers may not be visible.".to_string()
             }
+            Degradation::ScanFailed(msg) => format!("Scan failed: {msg}"),
         }
     }
 }

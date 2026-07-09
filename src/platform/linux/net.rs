@@ -5,21 +5,32 @@ use std::path::Path;
 /// Parse /proc/net/tcp and /proc/net/tcp6 to find listening sockets.
 pub fn list_listening_sockets(proc_root: &Path) -> Result<Vec<Socket>> {
     let mut sockets = Vec::new();
+    let mut any_ok = false;
+    let mut last_err = None;
 
-    // Read TCP sockets
-    if let Ok(tcp) = read_proc_net(proc_root, "tcp", Protocol::Tcp) {
-        sockets.extend(tcp);
-    }
-    if let Ok(tcp6) = read_proc_net(proc_root, "tcp6", Protocol::Tcp6) {
-        sockets.extend(tcp6);
+    // Read all four families. A single missing one (a box with IPv6 disabled,
+    // say) degrades gracefully — modern servers bind `::`, so we must not stop at
+    // the first success either. But if not one of the four could be read, the
+    // scan genuinely failed: say so rather than report "0 services".
+    for (file, protocol) in [
+        ("tcp", Protocol::Tcp),
+        ("tcp6", Protocol::Tcp6),
+        ("udp", Protocol::Udp),
+        ("udp6", Protocol::Udp6),
+    ] {
+        match read_proc_net(proc_root, file, protocol) {
+            Ok(s) => {
+                any_ok = true;
+                sockets.extend(s);
+            }
+            Err(e) => last_err = Some(e),
+        }
     }
 
-    // Read UDP sockets
-    if let Ok(udp) = read_proc_net(proc_root, "udp", Protocol::Udp) {
-        sockets.extend(udp);
-    }
-    if let Ok(udp6) = read_proc_net(proc_root, "udp6", Protocol::Udp6) {
-        sockets.extend(udp6);
+    if !any_ok {
+        if let Some(e) = last_err {
+            return Err(e);
+        }
     }
 
     Ok(sockets)
@@ -165,7 +176,10 @@ mod tests {
         assert_eq!(socket.port, 8080);
         assert_eq!(socket.state, TcpState::Listen);
         assert_eq!(socket.inode, 486312);
-        assert_eq!(socket.local_addr, std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(
+            socket.local_addr,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))
+        );
     }
 
     #[test]
@@ -190,7 +204,10 @@ mod tests {
         // ::1 — the last u32 group is 0x01000000 in host order.
         let line = "   0: 00000000000000000000000001000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 486401 1 0000 100 0 0 10 0";
         let socket = parse_proc_net_line(line, Protocol::Tcp6).unwrap();
-        assert_eq!(socket.local_addr, std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+        assert_eq!(
+            socket.local_addr,
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        );
     }
 
     #[test]

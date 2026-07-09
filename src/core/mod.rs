@@ -1,7 +1,9 @@
-pub mod engine;
-pub mod query;
+#![forbid(unsafe_code)]
+
 pub mod actions;
 pub mod config;
+pub mod engine;
+pub mod query;
 
-pub use engine::*;
 pub use config::*;
+pub use engine::*;

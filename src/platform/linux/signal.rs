@@ -54,8 +54,7 @@ mod tests {
         std::fs::write(dir.path().join("stat"), "cpu  1 2 3\nbtime 1700000000\n").unwrap();
         let pid_dir = dir.path().join(pid.to_string());
         std::fs::create_dir(&pid_dir).unwrap();
-        let stat =
-            format!("{pid} (svc) S 1 1 1 0 -1 0 0 0 0 0 10 20 0 0 20 0 1 0 {starttime} 0 0");
+        let stat = format!("{pid} (svc) S 1 1 1 0 -1 0 0 0 0 0 10 20 0 0 20 0 1 0 {starttime} 0 0");
         std::fs::write(pid_dir.join("stat"), stat).unwrap();
         dir
     }

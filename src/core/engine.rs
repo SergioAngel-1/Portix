@@ -1,10 +1,10 @@
-use crate::cache::store::{CpuSample, ProcessStatic};
+use crate::cache::store::CpuSample;
 use crate::cache::CacheStore;
 use crate::core::Config;
 use crate::detect::project::{detect_project, manifest_mtime};
 use crate::detect::DetectorRegistry;
 use crate::model::{
-    Degradation, Family, Process, ProcessKey, Service, ServiceId, Signal, Snapshot, SharedSnapshot,
+    Degradation, Family, Process, ProcessKey, Service, ServiceId, SharedSnapshot, Signal, Snapshot,
     Socket,
 };
 use crate::platform::{LinuxProbe, PlatformProbe};
@@ -58,7 +58,7 @@ impl Engine {
 
         let sockets = match self.platform.list_listening_sockets() {
             Ok(s) => s,
-            Err(e) => return Ok(Arc::new(self.empty_snapshot(start, vec![e]))),
+            Err(e) => return Ok(Arc::new(self.empty_snapshot(start, e))),
         };
 
         let sockets: Vec<Socket> = sockets
@@ -84,9 +84,21 @@ impl Engine {
         // and sampling CPU twice compares a counter against itself and yields no
         // delta at all for the second socket.
         let mut seen: HashMap<i32, Option<Process>> = HashMap::new();
+        // Container membership is per-process; project/framework is per (pid,
+        // port). A dual-stack service is two sockets on one port, so without
+        // these memos it re-reads /proc/<pid>/cgroup and re-walks manifests twice.
+        let mut seen_container: HashMap<i32, Option<crate::model::Container>> = HashMap::new();
+        type Context = (
+            Option<crate::model::Project>,
+            Option<crate::model::Framework>,
+        );
+        let mut seen_context: HashMap<(i32, u16), Context> = HashMap::new();
 
         for socket in sockets {
-            let pid = inode_map.get(&socket.inode).and_then(|v| v.first()).map(|&(pid, _)| pid);
+            let pid = inode_map
+                .get(&socket.inode)
+                .and_then(|v| v.first())
+                .map(|&(pid, _)| pid);
 
             let process = match pid {
                 Some(pid) => match seen.get(&pid) {
@@ -103,10 +115,31 @@ impl Engine {
                 }
             };
 
-            let container = pid.and_then(|pid| self.platform.container_of(pid));
-            let (project, framework) = match &process {
-                Some(p) => self.detect_context(p, socket.port),
-                None => (None, None),
+            let container = match pid {
+                Some(pid) => match seen_container.get(&pid) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let c = self.platform.container_of(pid);
+                        seen_container.insert(pid, c.clone());
+                        c
+                    }
+                },
+                None => None,
+            };
+
+            let (project, framework) = match (&process, pid) {
+                (Some(p), Some(pid)) => {
+                    let ctx_key = (pid, socket.port);
+                    match seen_context.get(&ctx_key) {
+                        Some(cached) => cached.clone(),
+                        None => {
+                            let ctx = self.detect_context(p, socket.port);
+                            seen_context.insert(ctx_key, ctx.clone());
+                            ctx
+                        }
+                    }
+                }
+                _ => (None, None),
             };
 
             services.push(Service {
@@ -137,13 +170,13 @@ impl Engine {
         }))
     }
 
-    fn empty_snapshot(&self, start: Instant, _errors: Vec<anyhow::Error>) -> Snapshot {
+    fn empty_snapshot(&self, start: Instant, error: anyhow::Error) -> Snapshot {
         Snapshot {
             services: Vec::new(),
             taken_at: start,
             taken_at_epoch_secs: epoch_secs(),
             scan_duration_ms: start.elapsed().as_millis() as u64,
-            degradations: vec![Degradation::SocketsWithoutPid(0)],
+            degradations: vec![Degradation::ScanFailed(format!("{error:#}"))],
         }
     }
 
@@ -160,7 +193,10 @@ impl Engine {
         true
     }
 
-    /// Read a process, serving its immutable half from L1 and its metrics fresh.
+    /// Read a process fresh from `/proc`, then attach its CPU delta from the
+    /// previous sample. Metadata is not cached: `cmdline`/`exe`/`cwd` change on
+    /// `exec`/`chdir` while `(pid, starttime)` stays the same, so a cached copy
+    /// would freeze to stale values for the process's whole life.
     fn resolve_process(
         &mut self,
         pid: i32,
@@ -173,20 +209,6 @@ impl Engine {
         let key = process.key();
         live.insert(key);
 
-        match self.cache.get_process(key) {
-            Some(cached) => {
-                process.name = cached.name.clone();
-                process.ppid = cached.ppid;
-                process.cmdline = cached.cmdline.clone();
-                process.exe = cached.exe.clone();
-                process.cwd = cached.cwd.clone();
-                process.started_at = cached.started_at;
-            }
-            None => {
-                self.cache.insert_process(key, ProcessStatic::from(&process));
-            }
-        }
-
         if let Some(started) = process.started_at {
             process.metrics.uptime = started.elapsed().ok();
         }
@@ -198,13 +220,14 @@ impl Engine {
             };
             // First sight of a process yields None: there is no delta yet.
             if let Some(prev) = self.cache.swap_cpu_sample(key, current) {
-                process.metrics.cpu_percent = crate::platform::linux::metrics::calculate_cpu_percent(
-                    prev.proc_jiffies,
-                    prev.total_jiffies,
-                    current.proc_jiffies,
-                    current.total_jiffies,
-                    self.cpu_scale_factor(),
-                );
+                process.metrics.cpu_percent =
+                    crate::platform::linux::metrics::calculate_cpu_percent(
+                        prev.proc_jiffies,
+                        prev.total_jiffies,
+                        current.proc_jiffies,
+                        current.total_jiffies,
+                        self.cpu_scale_factor(),
+                    );
             }
         }
 
@@ -224,7 +247,10 @@ impl Engine {
         &mut self,
         process: &Process,
         port: u16,
-    ) -> (Option<crate::model::Project>, Option<crate::model::Framework>) {
+    ) -> (
+        Option<crate::model::Project>,
+        Option<crate::model::Framework>,
+    ) {
         let Some(cwd) = process.cwd.as_deref() else {
             return (None, None);
         };
@@ -262,18 +288,31 @@ impl Engine {
         let Some(root) = root else {
             return detect(&self.registry);
         };
-        let (Some(root_inode), Some(mtime)) = (crate::cache::keys::inode(root), manifest_mtime(root))
+        let (Some(root_inode), Some(mtime)) =
+            (crate::cache::keys::inode(root), manifest_mtime(root))
         else {
             return detect(&self.registry);
         };
 
-        if let Some(cached) = self.cache.get_framework(root_inode, mtime) {
+        // Detection also depends on the process inputs, not just the manifest.
+        // Fold them into the key so two processes under one root but with
+        // different ports/commands don't read each other's cached framework.
+        let disc = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            port.hash(&mut hasher);
+            process.exe.hash(&mut hasher);
+            process.cmdline.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        if let Some(cached) = self.cache.get_framework(root_inode, mtime, disc) {
             return cached.clone();
         }
 
         let framework = detect(&self.registry);
         self.cache
-            .insert_framework(root_inode, mtime, framework.clone());
+            .insert_framework(root_inode, mtime, disc, framework.clone());
         framework
     }
 }

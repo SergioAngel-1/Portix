@@ -7,7 +7,25 @@ use ratatui::{
 };
 
 /// Render the status bar at the bottom.
-pub fn render(f: &mut Frame, area: Rect, snapshot: &Snapshot, search_active: bool) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    snapshot: &Snapshot,
+    search_active: bool,
+    error: Option<&str>,
+) {
+    // An effect failure — notably the TOCTOU guard refusing to signal a recycled
+    // PID — takes over the bar until the next keypress clears it. It must not be
+    // swallowed.
+    if let Some(err) = error {
+        let line = Line::from(Span::styled(
+            format!("⚠ {err}"),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+        f.render_widget(line, area);
+        return;
+    }
+
     let services_count = snapshot.services.len();
     let projects_count: usize = snapshot
         .services

@@ -53,10 +53,8 @@ impl Query {
                 for (idx, service) in services.iter().enumerate() {
                     let haystack = self.service_to_string(service);
                     let mut buf = Vec::new();
-                    let score = pattern.score(
-                        Utf32Str::new(&haystack, &mut buf),
-                        &mut self.matcher,
-                    );
+                    let score =
+                        pattern.score(Utf32Str::new(&haystack, &mut buf), &mut self.matcher);
                     if let Some(s) = score {
                         scored.push((s, idx, service));
                     }
@@ -64,7 +62,10 @@ impl Query {
 
                 // Sort by score (higher is better)
                 scored.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
-                scored.into_iter().map(|(_, idx, service)| (idx, service)).collect()
+                scored
+                    .into_iter()
+                    .map(|(_, idx, service)| (idx, service))
+                    .collect()
             }
         }
     }

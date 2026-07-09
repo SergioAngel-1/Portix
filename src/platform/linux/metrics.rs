@@ -6,7 +6,10 @@ pub fn get_total_jiffies(proc_root: &Path) -> Option<u64> {
     let first_line = content.lines().next()?;
     let rest = first_line.strip_prefix("cpu ")?;
 
-    let total: u64 = rest.split_whitespace().filter_map(|s| s.parse::<u64>().ok()).sum();
+    let total: u64 = rest
+        .split_whitespace()
+        .filter_map(|s| s.parse::<u64>().ok())
+        .sum();
     Some(total)
 }
 

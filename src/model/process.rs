@@ -187,7 +187,10 @@ mod tests {
 
     #[test]
     fn test_binary_name_from_a_normal_argv() {
-        assert_eq!(process("node", &["node", "server.js"]).binary_name(), "node");
+        assert_eq!(
+            process("node", &["node", "server.js"]).binary_name(),
+            "node"
+        );
         assert_eq!(
             process("node", &["/usr/bin/node", "server.js"]).binary_name(),
             "node"
