@@ -1,0 +1,50 @@
+use serde::Serialize;
+
+/// Container runtime detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Runtime {
+    Docker,
+    Podman,
+    Containerd,
+    SystemdNspawn,
+    Unknown,
+}
+
+impl Runtime {
+    pub fn display(&self) -> &str {
+        match self {
+            Runtime::Docker => "Docker",
+            Runtime::Podman => "Podman",
+            Runtime::Containerd => "containerd",
+            Runtime::SystemdNspawn => "systemd-nspawn",
+            Runtime::Unknown => "container",
+        }
+    }
+
+    pub fn glyph(&self) -> &str {
+        "🐳"
+    }
+}
+
+/// A detected container.
+#[derive(Debug, Clone, Serialize)]
+pub struct Container {
+    /// Container runtime
+    pub runtime: Runtime,
+    /// Container ID (short, 12 chars)
+    pub id: String,
+    /// Container name (if available, requires Docker API in v1.5)
+    pub name: Option<String>,
+    /// Docker Compose project name (if available)
+    pub compose_project: Option<String>,
+}
+
+impl Container {
+    /// Get display string for the container column.
+    pub fn display(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{} {}", self.runtime.glyph(), name),
+            None => format!("{} {}", self.runtime.glyph(), &self.id[..12.min(self.id.len())]),
+        }
+    }
+}

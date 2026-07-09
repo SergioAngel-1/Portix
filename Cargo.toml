@@ -1,0 +1,64 @@
+[package]
+name = "portix"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "The local development service explorer"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/portix/portix"
+keywords = ["tui", "ports", "development", "linux"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "portix"
+path = "src/main.rs"
+
+[lib]
+name = "portix_lib"
+path = "src/lib.rs"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Concurrency
+crossbeam-channel = "0.5"
+rayon = "1.10"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Fuzzy matching
+nucleo-matcher = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# XDG directories
+directories = "6"
+
+# System calls
+libc = "0.2"
+
+# Shell completions
+clap_complete = "4"
+
+# Clipboard (optional, for v1)
+# arboard = "3"
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
