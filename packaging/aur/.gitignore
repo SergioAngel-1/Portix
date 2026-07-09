@@ -1,0 +1,6 @@
+# The AUR repo tracks only the packaging sources; everything makepkg
+# generates (src/, pkg/, the git checkout, built packages) is ignored.
+*
+!.gitignore
+!.SRCINFO
+!PKGBUILD
