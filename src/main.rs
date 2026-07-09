@@ -78,14 +78,32 @@ fn main() -> Result<()> {
     // Handle --once mode
     if cli.once {
         let snapshot = engine.scan()?;
-        println!("Services: {}", snapshot.services.len());
-        for service in &snapshot.services {
-            println!(
-                "  :{} {} {}",
-                service.socket.port,
-                service.project_display(),
-                service.framework_display()
-            );
+        // Print header
+        println!("{:<6} {:<6} {:<20} {:<18} {:<8} {:<6} {:<6} {:<8}",
+            "PORT", "PROTO", "PROJECT", "FRAMEWORK", "PID", "CPU", "MEM", "UPTIME");
+        println!("{}", "-".repeat(80));
+        for service in snapshot.sorted_by_port() {
+            let port = format!("{:>5}", service.socket.port);
+            let proto = format!("{:<5}", service.socket.protocol);
+            let project = truncate(&service.project_display(), 19);
+            let framework = truncate(&service.framework_display(), 17);
+            let pid = service.process.as_ref()
+                .map(|p| format!("{:>5}", p.pid))
+                .unwrap_or_else(|| "    —".to_string());
+            let cpu = service.process.as_ref()
+                .and_then(|p| p.metrics.cpu_percent)
+                .map(|c| format!("{:>5.1}%", c))
+                .unwrap_or_else(|| "    —".to_string());
+            let mem = service.process.as_ref()
+                .and_then(|p| p.metrics.rss_bytes)
+                .map(|m| format_mem(m))
+                .unwrap_or_else(|| "   —".to_string());
+            let uptime = service.process.as_ref()
+                .and_then(|p| p.metrics.uptime)
+                .map(|u| format_duration(u))
+                .unwrap_or_else(|| "   —".to_string());
+            println!("{} {} {:<20} {:<18} {} {} {} {}",
+                port, proto, project, framework, pid, cpu, mem, uptime);
         }
         return Ok(());
     }
@@ -278,4 +296,39 @@ fn run_tui(config: Config, mut engine: Engine) -> Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+/// Truncate a string from the center.
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let keep = (max_len - 3) / 2;
+        format!("{}...{}", &s[..keep], &s[s.len() - keep..])
+    }
+}
+
+/// Format memory size.
+fn format_mem(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.0}K", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.0}M", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+/// Format duration.
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
 }

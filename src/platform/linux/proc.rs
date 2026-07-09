@@ -172,18 +172,29 @@ fn read_stat(pid_dir: &Path) -> Option<StatInfo> {
     // Field 1: ppid (index 1)
     let ppid = fields[1].parse::<i32>().ok()?;
 
-    // Field 19 (index 19): starttime
+    // Field 19 (index 19): starttime (jiffies since boot)
     let starttime = fields[19].parse::<u64>().ok();
+
+    // Get boot time from /proc/stat
+    let btime = std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("btime"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
 
     Some(StatInfo {
         ppid,
         state,
         started_at: starttime.map(|st| {
             // Convert jiffies to SystemTime
-            // This is simplified; real implementation needs btime from /proc/stat
-            let jiffies_per_sec = 100u64; // sysconf(_SC_CLK_TCK)
-            let secs = st / jiffies_per_sec;
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+            // starttime is jiffies since boot, btime is epoch seconds of boot
+            let jiffies_per_sec = 100u64;
+            let process_start_secs = st / jiffies_per_sec;
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(btime + process_start_secs)
         }),
     })
 }
