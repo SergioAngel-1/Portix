@@ -195,8 +195,27 @@ fn run_tui(config: Config, mut engine: Engine) -> Result<()> {
                 f,
                 chunks[1],
                 &app.snapshot,
-                app.query.query().is_empty(),
+                !app.query.query().is_empty(),
             );
+
+            // Render search bar if in search mode
+            if app.mode == portix_lib::ui::app::Mode::Search {
+                let search_area = ratatui::layout::Layout::default()
+                    .direction(ratatui::layout::Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(10),
+                        Constraint::Length(3),
+                        Constraint::Length(1),
+                    ])
+                    .split(f.area());
+                portix_lib::ui::views::search_bar::render(
+                    f,
+                    search_area[1],
+                    &app.search_buffer,
+                    app.snapshot.services.len(),
+                    app.filtered_indices.len(),
+                );
+            }
 
             // Render help if open
             if app.show_help {
