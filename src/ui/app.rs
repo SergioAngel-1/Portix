@@ -329,6 +329,7 @@ mod tests {
                     project: None,
                     framework: None,
                     container: None,
+                    docker_proxy_rewritten: false,
                 }
             })
             .collect();

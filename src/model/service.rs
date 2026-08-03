@@ -17,6 +17,11 @@ pub struct Service {
     pub framework: Option<Framework>,
     /// Container info (if running in a container)
     pub container: Option<Container>,
+    /// If true, this row was rewritten from a `docker-proxy` process into the
+    /// destination container. The original process/cmdline are preserved on
+    /// `process` so the UI can still show what really runs on the host.
+    #[serde(default)]
+    pub docker_proxy_rewritten: bool,
 }
 
 /// Unique identifier for a service.

@@ -1,5 +1,6 @@
 use crate::cache::store::CpuSample;
 use crate::cache::CacheStore;
+use crate::core::docker_proxy::rewrite_docker_proxy;
 use crate::core::Config;
 use crate::detect::project::{detect_project, manifest_mtime};
 use crate::detect::DetectorRegistry;
@@ -158,7 +159,10 @@ impl Engine {
                 project,
                 framework,
                 container,
+                docker_proxy_rewritten: false,
             });
+
+            rewrite_docker_proxy(services.last_mut().unwrap());
         }
 
         if unresolved > 0 {
@@ -425,6 +429,7 @@ mod tests {
             project: None,
             framework: None,
             container: None,
+            docker_proxy_rewritten: false,
         }
     }
 
