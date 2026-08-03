@@ -17,7 +17,9 @@ pub fn render(f: &mut Frame, area: Rect, cursor: usize, theme: &Theme) {
     let mut lines = vec![
         Line::from(Span::styled(
             "Theme",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
     ];
@@ -26,7 +28,9 @@ pub fn render(f: &mut Frame, area: Rect, cursor: usize, theme: &Theme) {
         let selected = i == cursor;
         let marker = if selected { "▸ " } else { "  " };
         let name_style = if selected {
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text)
         };

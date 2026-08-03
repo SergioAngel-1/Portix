@@ -13,12 +13,16 @@ use ratatui::{
 pub fn render(f: &mut Frame, area: Rect, degradations: &[Degradation], theme: &Theme) {
     let area = centered_rect(60, 80, area);
 
-    let header = Style::default().fg(theme.label).add_modifier(Modifier::BOLD);
+    let header = Style::default()
+        .fg(theme.label)
+        .add_modifier(Modifier::BOLD);
 
     let mut help_text = vec![
         Line::from(Span::styled(
             "Portix · Keyboard Shortcuts",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
         Line::from(Span::styled("NAVIGATION", header)),
@@ -37,7 +41,9 @@ pub fn render(f: &mut Frame, area: Rect, degradations: &[Degradation], theme: &T
         Line::raw(""),
         Line::from(Span::styled("GENERAL", header)),
         Line::from(vec![Span::raw("  r          refresh         q   quit")]),
-        Line::from(vec![Span::raw("  t          change theme    ?   this help")]),
+        Line::from(vec![Span::raw(
+            "  t          change theme    ?   this help",
+        )]),
     ];
 
     // The warnings section only appears when the scan actually degraded, so an
@@ -54,7 +60,9 @@ pub fn render(f: &mut Frame, area: Rect, degradations: &[Degradation], theme: &T
     }
 
     help_text.push(Line::raw(""));
-    help_text.push(Line::from(vec![Span::raw("              Esc or ? to close")]));
+    help_text.push(Line::from(vec![Span::raw(
+        "              Esc or ? to close",
+    )]));
 
     let block = Block::default()
         .title(" Help ")

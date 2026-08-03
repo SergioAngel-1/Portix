@@ -23,7 +23,11 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
         "MEM",
         "UPTIME",
     ])
-    .style(Style::default().fg(theme.label).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(theme.label)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = services
         .iter()

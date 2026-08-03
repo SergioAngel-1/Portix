@@ -40,7 +40,9 @@ pub fn render(
     if let Some(err) = error {
         let line = Line::from(Span::styled(
             format!("⚠ {err}"),
-            Style::default().fg(theme.danger).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.danger)
+                .add_modifier(Modifier::BOLD),
         ));
         f.render_widget(line, area);
         return;

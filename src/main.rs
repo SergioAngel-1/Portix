@@ -458,7 +458,12 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     }
 
     if app.detail_open {
-        portix_lib::ui::views::detail_panel::render(f, f.area(), app.selected_service(), &app.theme);
+        portix_lib::ui::views::detail_panel::render(
+            f,
+            f.area(),
+            app.selected_service(),
+            &app.theme,
+        );
     }
 
     if let Some(signal) = app.pending_kill() {

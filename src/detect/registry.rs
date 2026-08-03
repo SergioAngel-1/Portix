@@ -571,10 +571,7 @@ mod tests {
 
     #[test]
     fn test_framework_version_read_from_dependencies() {
-        let dir = project(&[(
-            "package.json",
-            r#"{"dependencies":{"next":"^15.1.0"}}"#,
-        )]);
+        let dir = project(&[("package.json", r#"{"dependencies":{"next":"^15.1.0"}}"#)]);
         let cmdline: Vec<String> = ["node", "/w/node_modules/.bin/next", "dev"]
             .iter()
             .map(|s| s.to_string())
@@ -589,10 +586,7 @@ mod tests {
 
     #[test]
     fn test_framework_version_from_dev_deps() {
-        let dir = project(&[(
-            "package.json",
-            r#"{"devDependencies":{"vite":"5.4.2"}}"#,
-        )]);
+        let dir = project(&[("package.json", r#"{"devDependencies":{"vite":"5.4.2"}}"#)]);
         let cmdline: Vec<String> = ["node", "/w/node_modules/.bin/vite"]
             .iter()
             .map(|s| s.to_string())

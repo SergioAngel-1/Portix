@@ -44,7 +44,8 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
             Span::raw(value),
         ])
     };
-    let dash_msg = |msg: &str| Line::from(Span::styled(msg.to_string(), Style::default().fg(muted_c)));
+    let dash_msg =
+        |msg: &str| Line::from(Span::styled(msg.to_string(), Style::default().fg(muted_c)));
     let blank = || Line::raw("");
 
     let mut lines: Vec<Line> = Vec::new();
@@ -52,7 +53,10 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
     // Framework (only when something was actually detected).
     if let Some(fw) = &service.framework {
         lines.push(Line::from(vec![
-            Span::styled(fw.confidence.glyph().to_string(), Style::default().fg(theme.ok)),
+            Span::styled(
+                fw.confidence.glyph().to_string(),
+                Style::default().fg(theme.ok),
+            ),
             Span::raw(" "),
             Span::styled(
                 cell(&fw.display_name),
@@ -161,7 +165,11 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
         Style::default().fg(theme.muted),
     )));
 
-    let title = format!(" :{}  {} ", service.socket.port, service.socket.proto_display());
+    let title = format!(
+        " :{}  {} ",
+        service.socket.port,
+        service.socket.proto_display()
+    );
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)

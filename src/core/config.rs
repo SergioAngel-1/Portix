@@ -162,12 +162,7 @@ fn upsert_theme_line(content: &str, theme: &str) -> String {
     let mut lines: Vec<String> = content
         .lines()
         .map(|line| {
-            let is_theme_key = line
-                .trim_start()
-                .split('=')
-                .next()
-                .map(str::trim)
-                == Some("theme");
+            let is_theme_key = line.trim_start().split('=').next().map(str::trim) == Some("theme");
             if is_theme_key {
                 replaced = true;
                 new_line.clone()

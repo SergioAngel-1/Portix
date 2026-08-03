@@ -142,7 +142,10 @@ mod tests {
     /// theme — this is the fix that makes the flag actually do something.
     #[test]
     fn test_no_color_forces_monochrome_over_any_name() {
-        assert_eq!(Theme::select("dark", false).accent, Theme::monochrome().accent);
+        assert_eq!(
+            Theme::select("dark", false).accent,
+            Theme::monochrome().accent
+        );
         assert_eq!(Theme::select("auto", false).warn, Theme::monochrome().warn);
     }
 }

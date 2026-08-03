@@ -28,7 +28,13 @@ pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
 
     let cmdline = read_cmdline(&pid_dir).unwrap_or_default();
     let exe = read_link_safe(&pid_dir.join("exe")).ok();
-    let cwd = read_link_safe(&pid_dir.join("cwd")).ok();
+    let cwd = read_link_safe(&pid_dir.join("cwd")).ok().map(|p| {
+        if p.is_absolute() {
+            p
+        } else {
+            pid_dir.join(&p)
+        }
+    });
     let status = read_status(&pid_dir).unwrap_or_default();
     let user = match status.uid {
         Some(uid) => uid_to_username(uid),
