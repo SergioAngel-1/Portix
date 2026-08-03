@@ -1,16 +1,18 @@
+use crate::model::Degradation;
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
-/// Render the help modal.
-pub fn render(f: &mut Frame, area: Rect) {
+/// Render the help modal. Active scan degradations are listed at the bottom, so
+/// the `⚠` count in the footer has somewhere to unfold into.
+pub fn render(f: &mut Frame, area: Rect, degradations: &[Degradation]) {
     let area = centered_rect(60, 80, area);
 
-    let help_text = vec![
+    let mut help_text = vec![
         Line::from(Span::styled(
             "Portix · Keyboard Shortcuts",
             Style::default()
@@ -55,18 +57,39 @@ pub fn render(f: &mut Frame, area: Rect) {
         )),
         Line::from(vec![Span::raw("  r          refresh         q   quit")]),
         Line::from(vec![Span::raw("  ?          this help")]),
-        Line::raw(""),
-        Line::from(vec![Span::raw("              Esc or ? to close")]),
     ];
+
+    // The warnings section only appears when the scan actually degraded, so an
+    // empty run stays uncluttered.
+    if !degradations.is_empty() {
+        help_text.push(Line::raw(""));
+        help_text.push(Line::from(Span::styled(
+            "WARNINGS",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for degradation in degradations {
+            help_text.push(Line::from(vec![
+                Span::styled("  ⚠ ", Style::default().fg(Color::Yellow)),
+                Span::styled(degradation.message(), Style::default().fg(Color::Yellow)),
+            ]));
+        }
+    }
+
+    help_text.push(Line::raw(""));
+    help_text.push(Line::from(vec![Span::raw("              Esc or ? to close")]));
 
     let block = Block::default()
         .title(" Help ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
+    // Wrap so a long warning message folds inside the modal instead of clipping.
     let paragraph = Paragraph::new(help_text)
         .block(block)
-        .alignment(Alignment::Left);
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: false });
 
     f.render_widget(Clear, area);
     f.render_widget(paragraph, area);

@@ -449,6 +449,6 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     }
 
     if app.show_help() {
-        portix_lib::ui::views::help::render(f, f.area());
+        portix_lib::ui::views::help::render(f, f.area(), &app.snapshot.degradations);
     }
 }
