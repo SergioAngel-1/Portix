@@ -78,7 +78,9 @@ impl Theme {
         }
         match name {
             "mono" | "monochrome" | "none" => Self::monochrome(),
-            "auto" | "terminal" => Self::from_terminal(),
+            "auto" | "terminal" | "from-terminal" => Self::from_terminal(),
+            // "default-dark" is the config's own default spelling; accept both.
+            "default-dark" | "dark" => Self::default_dark(),
             _ => Self::default_dark(),
         }
     }
