@@ -70,9 +70,4 @@ impl Service {
     pub fn starttime(&self) -> Option<u64> {
         self.process.as_ref().map(|p| p.starttime_jiffies)
     }
-
-    /// Check if this service has degraded data.
-    pub fn has_degradation(&self) -> bool {
-        self.process.is_none() || self.project.is_none()
-    }
 }

@@ -70,14 +70,16 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
         lines.push(blank());
     }
 
-    // Project.
+    // Project. Paths are shortened to `~/…` when under $HOME so the common case
+    // reads clearly instead of wrapping on the home prefix.
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     lines.push(section("PROJECT"));
     if let Some(project) = &service.project {
         lines.push(kv("Name", cell(&project.name)));
         if let Some(tech) = &project.technical_name {
             lines.push(kv("Package", cell(tech)));
         }
-        lines.push(kv("Route", cell(&project.root.to_string_lossy())));
+        lines.push(kv("Route", cell(&project.short_path(home.as_deref()))));
         if let Some(ws) = &project.workspace_root {
             lines.push(kv("Workspace", cell(&ws.to_string_lossy())));
         }

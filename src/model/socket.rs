@@ -139,11 +139,6 @@ impl Socket {
         format!("http://localhost:{}", self.port)
     }
 
-    /// Check if this socket is a listening TCP socket.
-    pub fn is_listening(&self) -> bool {
-        self.state == TcpState::Listen
-    }
-
     /// Protocol as shown in the PROTO column, collapsing dual-stack pairs.
     pub fn proto_display(&self) -> String {
         if self.dual_stack {

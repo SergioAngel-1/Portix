@@ -8,7 +8,6 @@
 //! this file, and there must never be: a project name is attacker-controlled
 //! text, and a shell would happily interpret it.
 
-use crate::model::Service;
 use anyhow::{anyhow, Context, Result};
 use std::process::Command;
 
@@ -47,27 +46,4 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
     Err(anyhow!(
         "No clipboard tool found (install wl-copy or xclip)"
     ))
-}
-
-/// Get the URL for a service.
-pub fn get_url(service: &Service) -> String {
-    service.socket.url()
-}
-
-/// Get the command for a service.
-pub fn get_command(service: &Service) -> String {
-    service
-        .process
-        .as_ref()
-        .map(|p| p.command_display())
-        .unwrap_or_default()
-}
-
-/// Get the project path for a service.
-pub fn get_project_path(service: &Service) -> String {
-    service
-        .project
-        .as_ref()
-        .map(|p| p.root.to_string_lossy().to_string())
-        .unwrap_or_default()
 }

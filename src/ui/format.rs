@@ -74,22 +74,6 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Format duration in human-readable form.
-pub fn format_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        let mins = secs / 60;
-        let secs = secs % 60;
-        format!("{}m {}s", mins, secs)
-    } else {
-        let hours = secs / 3600;
-        let mins = (secs % 3600) / 60;
-        format!("{}h {}m", hours, mins)
-    }
-}
-
 /// Truncate a string from the center, keeping the head and tail.
 ///
 /// Operates on `char`s, never byte indices: project paths routinely contain
@@ -108,15 +92,6 @@ pub fn truncate_center(s: &str, max_len: usize) -> String {
     let head: String = s.chars().take(keep).collect();
     let tail: String = s.chars().skip(char_count - keep).collect();
     format!("{}...{}", head, tail)
-}
-
-/// Format CPU percentage.
-pub fn format_cpu(percent: f64) -> String {
-    if percent < 0.1 {
-        "  —".to_string()
-    } else {
-        format!("{:>5.1}%", percent)
-    }
 }
 
 #[cfg(test)]

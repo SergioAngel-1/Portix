@@ -140,11 +140,6 @@ impl Process {
             starttime_jiffies: self.starttime_jiffies,
         }
     }
-
-    /// Check if this is a kernel thread.
-    pub fn is_kernel_thread(&self) -> bool {
-        self.exe.is_none() && self.cwd.is_none()
-    }
 }
 
 /// Key for process cache: (pid, starttime).
