@@ -13,6 +13,8 @@ pub enum Mode {
     Help,
     /// Waiting for the user to confirm a kill, remembering which signal.
     ConfirmKill(Signal),
+    /// Browsing themes with live preview; Enter saves, Esc reverts.
+    ThemePicker,
 }
 
 /// The main application state.
@@ -25,15 +27,24 @@ pub struct App {
     pub search_buffer: String,
     pub detail_open: bool,
     pub config: Config,
-    /// Active color palette, resolved once from config + the `--no-color` flag.
+    /// Active color palette, resolved from config + the `--no-color` flag.
     pub theme: Theme,
+    /// Whether color is enabled at all; a live theme switch respects it.
+    pub color_enabled: bool,
+    /// Name of the active theme, kept in sync with `config.theme`.
+    pub theme_name: String,
+    /// Cursor within `Theme::NAMES` while the picker is open.
+    pub theme_cursor: usize,
+    /// Theme (name + palette) to restore if the picker is cancelled.
+    theme_saved: Option<(String, Theme)>,
     /// Set when an effect failed, shown in the status bar until the next action.
     pub error: Option<String>,
 }
 
 impl App {
     /// Create a new application.
-    pub fn new(config: Config, theme: Theme) -> Self {
+    pub fn new(config: Config, theme: Theme, color_enabled: bool) -> Self {
+        let theme_name = config.theme.clone();
         Self {
             mode: Mode::Normal,
             snapshot: Arc::new(Snapshot {
@@ -50,6 +61,10 @@ impl App {
             detail_open: false,
             config,
             theme,
+            color_enabled,
+            theme_name,
+            theme_cursor: 0,
+            theme_saved: None,
             error: None,
         }
     }
@@ -110,6 +125,7 @@ impl App {
                 }
                 KeyCode::Char('x') => self.request_kill(Signal::Term, &mut effects),
                 KeyCode::Char('X') => self.request_kill(Signal::Kill, &mut effects),
+                KeyCode::Char('t') => self.open_theme_picker(),
                 _ => {}
             },
 
@@ -152,9 +168,57 @@ impl App {
                 }
                 _ => {}
             },
+
+            Mode::ThemePicker => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.theme_cursor = self.theme_cursor.saturating_sub(1);
+                    self.apply_theme_at_cursor();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.theme_cursor + 1 < Theme::NAMES.len() {
+                        self.theme_cursor += 1;
+                    }
+                    self.apply_theme_at_cursor();
+                }
+                // Tapping `t` cycles, so the same key that opened the picker also
+                // walks through the options.
+                KeyCode::Char('t') => {
+                    self.theme_cursor = (self.theme_cursor + 1) % Theme::NAMES.len();
+                    self.apply_theme_at_cursor();
+                }
+                KeyCode::Enter => {
+                    self.theme_saved = None;
+                    self.mode = Mode::Normal;
+                    effects.push(Effect::PersistConfig);
+                }
+                KeyCode::Esc => {
+                    if let Some((name, theme)) = self.theme_saved.take() {
+                        self.theme = theme;
+                        self.config.theme = name.clone();
+                        self.theme_name = name;
+                    }
+                    self.mode = Mode::Normal;
+                }
+                _ => {}
+            },
         }
 
         effects
+    }
+
+    /// Open the theme picker, remembering the current theme so Esc can revert.
+    fn open_theme_picker(&mut self) {
+        self.theme_saved = Some((self.theme_name.clone(), self.theme));
+        self.theme_cursor = Theme::name_index(&self.theme_name);
+        self.mode = Mode::ThemePicker;
+    }
+
+    /// Apply the theme under the picker cursor immediately, for live preview.
+    fn apply_theme_at_cursor(&mut self) {
+        let name = Theme::NAMES[self.theme_cursor];
+        self.theme = Theme::select(name, self.color_enabled);
+        self.theme_name = name.to_string();
+        self.config.theme = self.theme_name.clone();
     }
 
     fn request_kill(&mut self, signal: Signal, effects: &mut Vec<Effect>) {
@@ -218,6 +282,8 @@ pub enum Effect {
     Kill(ServiceId, Signal),
     CopyToClipboard(String),
     Refresh,
+    /// Persist the current config (theme) to disk.
+    PersistConfig,
 }
 
 #[cfg(test)]
@@ -267,7 +333,7 @@ mod tests {
             })
             .collect();
 
-        let mut app = App::new(Config::default(), Theme::default_dark());
+        let mut app = App::new(Config::default(), Theme::default_dark(), true);
         app.update_snapshot(Arc::new(Snapshot {
             services,
             taken_at: std::time::Instant::now(),
@@ -350,6 +416,35 @@ mod tests {
         assert!(app.detail_open);
         app.handle_key(KeyEvent::from(KeyCode::Esc));
         assert!(!app.detail_open, "Esc closes the panel first");
+    }
+
+    #[test]
+    fn test_t_opens_picker_and_enter_saves() {
+        let mut app = app_with_services(1);
+        app.handle_key(key('t'));
+        assert_eq!(app.mode, Mode::ThemePicker);
+
+        // Cycle to the next theme; the palette must actually change.
+        let before = app.theme_name.clone();
+        app.handle_key(key('t'));
+        assert_ne!(app.theme_name, before, "tapping t previews the next theme");
+
+        let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(effects.contains(&Effect::PersistConfig), "Enter persists");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn test_esc_reverts_theme_preview() {
+        let mut app = app_with_services(1);
+        let original = app.theme_name.clone();
+        app.handle_key(key('t'));
+        app.handle_key(key('j')); // preview a different theme
+        assert_ne!(app.theme_name, original);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.theme_name, original, "Esc reverts the preview");
+        assert_eq!(app.config.theme, original);
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]

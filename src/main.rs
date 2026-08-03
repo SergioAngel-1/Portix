@@ -148,8 +148,9 @@ fn run() -> Result<i32> {
         return print_table(&mut engine);
     }
 
-    let theme = Theme::select(&config.theme, use_color(&cli));
-    run_tui(config, engine, theme)?;
+    let color = use_color(&cli);
+    let theme = Theme::select(&config.theme, color);
+    run_tui(config, engine, theme, color)?;
     Ok(exit::OK)
 }
 
@@ -296,7 +297,7 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
     Ok(exit::OK)
 }
 
-fn run_tui(config: Config, mut engine: Engine, theme: Theme) -> Result<()> {
+fn run_tui(config: Config, mut engine: Engine, theme: Theme, color: bool) -> Result<()> {
     if !io::stdout().is_terminal() {
         anyhow::bail!("stdout is not a terminal; use --once or --json");
     }
@@ -307,7 +308,7 @@ fn run_tui(config: Config, mut engine: Engine, theme: Theme) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = event_loop(&mut terminal, config, &mut engine, theme);
+    let result = event_loop(&mut terminal, config, &mut engine, theme, color);
 
     // Restore the terminal even if the loop failed. Leaving a user in raw mode
     // on the alternate screen is worse than whatever error got us here.
@@ -323,8 +324,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     config: Config,
     engine: &mut Engine,
     theme: Theme,
+    color: bool,
 ) -> Result<()> {
-    let mut app = App::new(config.clone(), theme);
+    let mut app = App::new(config.clone(), theme, color);
     app.update_snapshot(engine.scan()?);
 
     let refresh = Duration::from_millis(config.min_refresh_ms());
@@ -404,6 +406,12 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             Ok(snapshot) => app.update_snapshot(snapshot),
             Err(e) => app.error = Some(e.to_string()),
         },
+
+        Effect::PersistConfig => {
+            if let Err(e) = app.config.save_theme() {
+                app.error = Some(format!("could not save theme: {e}"));
+            }
+        }
     }
     ControlFlow::Continue
 }
@@ -461,6 +469,10 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
             signal,
             &app.theme,
         );
+    }
+
+    if app.mode == Mode::ThemePicker {
+        portix_lib::ui::views::theme_picker::render(f, f.area(), app.theme_cursor, &app.theme);
     }
 
     if app.show_help() {

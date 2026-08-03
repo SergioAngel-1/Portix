@@ -16,11 +16,12 @@ const HINTS: &[(&str, &str)] = &[
     ("o", "open"),
     ("y", "copy"),
     ("/", "search"),
+    ("t", "theme"),
     ("?", "help"),
     ("q", "quit"),
 ];
 /// Index into `HINTS` of the entry that must always remain visible.
-const PINNED_HINT: usize = 5; // ("?", "help")
+const PINNED_HINT: usize = 6; // ("?", "help")
 const SEP: &str = " · ";
 
 /// Render the status bar at the bottom: key hints on the left, compact stats on

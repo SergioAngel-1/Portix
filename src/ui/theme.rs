@@ -85,6 +85,14 @@ impl Theme {
         }
     }
 
+    /// The selectable theme names, in the order the picker cycles them.
+    pub const NAMES: &'static [&'static str] = &["default-dark", "mono", "auto"];
+
+    /// Index of a theme name in `NAMES`, defaulting to 0 for unknown names.
+    pub fn name_index(name: &str) -> usize {
+        Self::NAMES.iter().position(|&n| n == name).unwrap_or(0)
+    }
+
     /// Get style for a specific semantic role.
     pub fn style(&self, role: Role) -> Style {
         Style::default().fg(self.color(role))

@@ -37,7 +37,7 @@ pub fn render(f: &mut Frame, area: Rect, degradations: &[Degradation], theme: &T
         Line::raw(""),
         Line::from(Span::styled("GENERAL", header)),
         Line::from(vec![Span::raw("  r          refresh         q   quit")]),
-        Line::from(vec![Span::raw("  ?          this help")]),
+        Line::from(vec![Span::raw("  t          change theme    ?   this help")]),
     ];
 
     // The warnings section only appears when the scan actually degraded, so an
