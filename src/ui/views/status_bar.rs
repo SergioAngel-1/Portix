@@ -1,7 +1,8 @@
 use crate::model::Snapshot;
+use crate::ui::theme::Theme;
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     Frame,
 };
@@ -30,6 +31,7 @@ pub fn render(
     snapshot: &Snapshot,
     search_active: bool,
     error: Option<&str>,
+    theme: &Theme,
 ) {
     // An effect failure — notably the TOCTOU guard refusing to signal a recycled
     // PID — takes over the whole bar until the next keypress clears it. It must
@@ -37,13 +39,13 @@ pub fn render(
     if let Some(err) = error {
         let line = Line::from(Span::styled(
             format!("⚠ {err}"),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.danger).add_modifier(Modifier::BOLD),
         ));
         f.render_widget(line, area);
         return;
     }
 
-    let right = stats_spans(snapshot, search_active);
+    let right = stats_spans(snapshot, search_active, theme);
     let right_width = spans_width(&right);
 
     let area_width = area.width as usize;
@@ -51,7 +53,7 @@ pub fn render(
 
     // One space of margin from the left edge, then the hints that fit.
     let mut spans = vec![Span::raw(" ")];
-    spans.extend(hint_spans(&indices));
+    spans.extend(hint_spans(&indices, theme));
     let left_width = spans_width(&spans);
 
     // Push the stats flush right. If nothing fits, a single space keeps the two
@@ -65,9 +67,9 @@ pub fn render(
 
 /// Compact right-aligned stats: `12 svc · 3 proj · 8ms`, with container and
 /// degradation counts folded in only when non-zero.
-fn stats_spans(snapshot: &Snapshot, search_active: bool) -> Vec<Span<'static>> {
-    let gray = Style::default().fg(Color::Gray);
-    let sep = || Span::styled(SEP, Style::default().fg(Color::DarkGray));
+fn stats_spans(snapshot: &Snapshot, search_active: bool, theme: &Theme) -> Vec<Span<'static>> {
+    let label = Style::default().fg(theme.label);
+    let sep = || Span::styled(SEP, Style::default().fg(theme.muted));
 
     let services = snapshot.services.len();
     let projects = snapshot
@@ -88,22 +90,20 @@ fn stats_spans(snapshot: &Snapshot, search_active: bool) -> Vec<Span<'static>> {
     if search_active {
         spans.push(Span::styled(
             "/",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(" "));
     }
 
-    spans.push(Span::styled(format!("{services} svc"), gray));
+    spans.push(Span::styled(format!("{services} svc"), label));
     spans.push(sep());
-    spans.push(Span::styled(format!("{projects} proj"), gray));
+    spans.push(Span::styled(format!("{projects} proj"), label));
 
     if containers > 0 {
         spans.push(sep());
         spans.push(Span::styled(
             format!("{containers} cont"),
-            Style::default().fg(Color::Blue),
+            Style::default().fg(theme.container),
         ));
     }
 
@@ -111,14 +111,14 @@ fn stats_spans(snapshot: &Snapshot, search_active: bool) -> Vec<Span<'static>> {
         spans.push(sep());
         spans.push(Span::styled(
             format!("⚠{}", snapshot.degradations.len()),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.warn),
         ));
     }
 
     spans.push(sep());
     spans.push(Span::styled(
         format!("{}ms", snapshot.scan_duration_ms),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     ));
 
     spans
@@ -133,7 +133,7 @@ fn visible_hints(area_width: usize, right_width: usize) -> Vec<usize> {
     let reserve = right_width + 2;
     let mut indices: Vec<usize> = (0..HINTS.len()).collect();
 
-    while spans_width(&hint_spans(&indices)) + reserve > area_width && indices.len() > 1 {
+    while hint_width(&indices) + reserve > area_width && indices.len() > 1 {
         match indices.iter().rposition(|&i| i != PINNED_HINT) {
             Some(pos) => {
                 indices.remove(pos);
@@ -145,13 +145,25 @@ fn visible_hints(area_width: usize, right_width: usize) -> Vec<usize> {
     indices
 }
 
+/// Display width of a set of hints, separators included — no styling, so the
+/// fitting logic stays independent of the theme.
+fn hint_width(indices: &[usize]) -> usize {
+    let mut width = 0;
+    for (i, &idx) in indices.iter().enumerate() {
+        if i > 0 {
+            width += SEP.chars().count();
+        }
+        let (key, label) = HINTS[idx];
+        width += key.chars().count() + 1 + label.chars().count();
+    }
+    width
+}
+
 /// Render a set of hint indices as `key label` pairs joined by ` · `.
-fn hint_spans(indices: &[usize]) -> Vec<Span<'static>> {
-    let key_style = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(Color::Gray);
-    let sep_style = Style::default().fg(Color::DarkGray);
+fn hint_spans(indices: &[usize], theme: &Theme) -> Vec<Span<'static>> {
+    let key_style = Style::default().fg(theme.warn).add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(theme.label);
+    let sep_style = Style::default().fg(theme.muted);
 
     let mut spans = Vec::with_capacity(indices.len() * 3);
     for (i, &idx) in indices.iter().enumerate() {
@@ -166,7 +178,7 @@ fn hint_spans(indices: &[usize]) -> Vec<Span<'static>> {
 }
 
 /// Display width of a span run, counting columns rather than bytes so the
-/// multibyte glyphs (`↵`, `·`, `⚠`) do not throw the layout off.
+/// multibyte glyphs (`·`, `⚠`) do not throw the layout off.
 fn spans_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
 }
@@ -183,7 +195,7 @@ mod tests {
     #[test]
     fn test_narrow_terminal_drops_from_the_right() {
         // Room for a few hints but not all: the rightmost non-pinned ones go
-        // first, so `q quit` is dropped before `↵ details`.
+        // first, so `q quit` is dropped before `i info`.
         let indices = visible_hints(40, 20);
         assert!(indices.len() < HINTS.len());
         assert_eq!(indices.first(), Some(&0), "highest-priority hint kept");

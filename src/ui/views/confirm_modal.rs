@@ -1,15 +1,16 @@
 use crate::model::{Service, Signal};
 use crate::ui::format::cell;
+use crate::ui::theme::Theme;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
 /// Render the kill confirmation modal.
-pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, signal: Signal) {
+pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, signal: Signal, theme: &Theme) {
     let Some(service) = service else {
         return;
     };
@@ -17,8 +18,8 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, signal: Sign
     let area = centered_rect(56, 9, area);
 
     let (verb, color) = match signal {
-        Signal::Kill => ("Force kill (SIGKILL)", Color::Red),
-        _ => ("Kill (SIGTERM)", Color::Yellow),
+        Signal::Kill => ("Force kill (SIGKILL)", theme.danger),
+        _ => ("Kill (SIGTERM)", theme.warn),
     };
 
     let pid = service
@@ -40,7 +41,7 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, signal: Sign
         Line::raw(""),
         Line::from(Span::styled(
             "  Enter / y  confirm      Esc / n  cancel",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme.label),
         )),
     ];
 

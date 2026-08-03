@@ -1,15 +1,13 @@
 use crate::model::{BindScope, Service};
 use crate::ui::format::{cell, format_bytes, format_uptime};
+use crate::ui::theme::Theme;
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-
-/// Colour for the fixed-width field labels down the left of each row.
-const LABEL: Color = Color::DarkGray;
 
 /// Render the info panel for the selected service as a centered modal overlay.
 ///
@@ -17,7 +15,7 @@ const LABEL: Color = Color::DarkGray;
 /// project and container names — is attacker-controlled and passes through
 /// `format::cell`, the mandatory sanitisation chokepoint (PRD §13.2). A process
 /// with `argv[0] = "\x1b]0;pwned\x07"` must not hijack the terminal from here.
-pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>) {
+pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Theme) {
     let area = centered_rect(66, 84, area);
     f.render_widget(Clear, area);
 
@@ -25,41 +23,49 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>) {
         let block = Block::default()
             .title(" Info ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Gray));
-        f.render_widget(
-            Paragraph::new("No service selected.").block(block),
-            area,
-        );
+            .border_style(Style::default().fg(theme.muted));
+        f.render_widget(Paragraph::new("No service selected.").block(block), area);
         return;
     };
+
+    // Local styling helpers so the many rows below stay terse. Colors are Copy,
+    // captured here from the active theme.
+    let label_c = theme.label;
+    let muted_c = theme.muted;
+    let section = |title: &str| {
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default().fg(label_c).add_modifier(Modifier::BOLD),
+        ))
+    };
+    let kv = |label: &str, value: String| {
+        Line::from(vec![
+            Span::styled(format!("  {label:<9} "), Style::default().fg(muted_c)),
+            Span::raw(value),
+        ])
+    };
+    let dash_msg = |msg: &str| Line::from(Span::styled(msg.to_string(), Style::default().fg(muted_c)));
+    let blank = || Line::raw("");
 
     let mut lines: Vec<Line> = Vec::new();
 
     // Framework (only when something was actually detected).
     if let Some(fw) = &service.framework {
         lines.push(Line::from(vec![
-            Span::styled(
-                fw.confidence.glyph().to_string(),
-                Style::default().fg(Color::Green),
-            ),
+            Span::styled(fw.confidence.glyph().to_string(), Style::default().fg(theme.ok)),
             Span::raw(" "),
             Span::styled(
                 cell(&fw.display_name),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(" {}", fw.version.as_deref().unwrap_or(""))),
             Span::styled(
                 format!("  ({})", fw.confidence.display()),
-                Style::default().fg(LABEL),
+                Style::default().fg(theme.muted),
             ),
         ]));
         if !fw.matched_signals.is_empty() {
-            lines.push(kv(
-                "Evidence",
-                cell(&fw.matched_signals.join(", ")),
-            ));
+            lines.push(kv("Evidence", cell(&fw.matched_signals.join(", "))));
         }
         lines.push(blank());
     }
@@ -82,7 +88,7 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>) {
             lines.push(kv("Manager", pm.display().to_string()));
         }
     } else {
-        lines.push(dash());
+        lines.push(dash_msg("  —"));
     }
     lines.push(blank());
 
@@ -150,14 +156,14 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>) {
     lines.push(blank());
     lines.push(Line::from(Span::styled(
         "  Esc / i to close",
-        Style::default().fg(LABEL),
+        Style::default().fg(theme.muted),
     )));
 
     let title = format!(" :{}  {} ", service.socket.port, service.socket.proto_display());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme.accent));
 
     // Wrap so long command lines and paths fold inside the modal.
     let paragraph = Paragraph::new(lines)
@@ -194,33 +200,6 @@ fn bind_scope_label(scope: &BindScope) -> String {
         BindScope::AllInterfaces => "all interfaces".to_string(),
         BindScope::Specific(ip) => ip.to_string(),
     }
-}
-
-fn section(title: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        title.to_string(),
-        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
-    ))
-}
-
-/// A `label   value` row with the label in a fixed-width gutter.
-fn kv(label: &str, value: String) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("  {label:<9} "), Style::default().fg(LABEL)),
-        Span::raw(value),
-    ])
-}
-
-fn dash() -> Line<'static> {
-    dash_msg("  —")
-}
-
-fn dash_msg(msg: &str) -> Line<'static> {
-    Line::from(Span::styled(msg.to_string(), Style::default().fg(LABEL)))
-}
-
-fn blank() -> Line<'static> {
-    Line::raw("")
 }
 
 /// Create a centered rectangle covering `percent_x` × `percent_y` of `r`.

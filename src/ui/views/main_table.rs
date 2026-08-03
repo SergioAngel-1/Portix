@@ -1,8 +1,9 @@
 use crate::model::Service;
 use crate::ui::format::{cell, format_bytes_compact, format_uptime, truncate_center};
+use crate::ui::theme::Theme;
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::{Row, Table, TableState},
     Frame,
 };
@@ -10,7 +11,7 @@ use ratatui::{
 const DASH: &str = "—";
 
 /// Render the main service table.
-pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize) {
+pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize, theme: &Theme) {
     let header = Row::new(vec![
         "PORT",
         "PROTO",
@@ -22,11 +23,7 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize)
         "MEM",
         "UPTIME",
     ])
-    .style(
-        Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
-    );
+    .style(Style::default().fg(theme.label).add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = services
         .iter()
@@ -79,7 +76,7 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize)
         .header(header)
         .row_highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▸ ");

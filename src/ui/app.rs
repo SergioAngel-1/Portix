@@ -1,6 +1,7 @@
 use crate::core::query::Query;
 use crate::core::Config;
 use crate::model::{Service, ServiceId, SharedSnapshot, Signal, Snapshot};
+use crate::ui::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::Arc;
 
@@ -24,13 +25,15 @@ pub struct App {
     pub search_buffer: String,
     pub detail_open: bool,
     pub config: Config,
+    /// Active color palette, resolved once from config + the `--no-color` flag.
+    pub theme: Theme,
     /// Set when an effect failed, shown in the status bar until the next action.
     pub error: Option<String>,
 }
 
 impl App {
     /// Create a new application.
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, theme: Theme) -> Self {
         Self {
             mode: Mode::Normal,
             snapshot: Arc::new(Snapshot {
@@ -46,6 +49,7 @@ impl App {
             search_buffer: String::new(),
             detail_open: false,
             config,
+            theme,
             error: None,
         }
     }
@@ -263,7 +267,7 @@ mod tests {
             })
             .collect();
 
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config::default(), Theme::default_dark());
         app.update_snapshot(Arc::new(Snapshot {
             services,
             taken_at: std::time::Instant::now(),

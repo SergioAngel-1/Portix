@@ -18,6 +18,7 @@ use portix_lib::core::{Config, Engine};
 use portix_lib::model::{Service, SharedSnapshot, Signal};
 use portix_lib::ui::app::{App, Effect, Mode};
 use portix_lib::ui::format::{cell, format_bytes_compact, format_uptime, truncate_center};
+use portix_lib::ui::Theme;
 
 /// The JSON contract. Consumers switch on `schema_version`; unknown fields must
 /// be ignored. Adding a field is a minor bump, removing or retyping one is major.
@@ -147,7 +148,8 @@ fn run() -> Result<i32> {
         return print_table(&mut engine);
     }
 
-    run_tui(config, engine, use_color(&cli))?;
+    let theme = Theme::select(&config.theme, use_color(&cli));
+    run_tui(config, engine, theme)?;
     Ok(exit::OK)
 }
 
@@ -294,7 +296,7 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
     Ok(exit::OK)
 }
 
-fn run_tui(config: Config, mut engine: Engine, _color: bool) -> Result<()> {
+fn run_tui(config: Config, mut engine: Engine, theme: Theme) -> Result<()> {
     if !io::stdout().is_terminal() {
         anyhow::bail!("stdout is not a terminal; use --once or --json");
     }
@@ -305,7 +307,7 @@ fn run_tui(config: Config, mut engine: Engine, _color: bool) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = event_loop(&mut terminal, config, &mut engine);
+    let result = event_loop(&mut terminal, config, &mut engine, theme);
 
     // Restore the terminal even if the loop failed. Leaving a user in raw mode
     // on the alternate screen is worse than whatever error got us here.
@@ -320,8 +322,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     config: Config,
     engine: &mut Engine,
+    theme: Theme,
 ) -> Result<()> {
-    let mut app = App::new(config.clone());
+    let mut app = App::new(config.clone(), theme);
     app.update_snapshot(engine.scan()?);
 
     let refresh = Duration::from_millis(config.min_refresh_ms());
@@ -417,13 +420,14 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
         .filter_map(|&idx| app.snapshot.services.get(idx))
         .collect();
 
-    portix_lib::ui::views::main_table::render(f, chunks[0], &services, app.selected);
+    portix_lib::ui::views::main_table::render(f, chunks[0], &services, app.selected, &app.theme);
     portix_lib::ui::views::status_bar::render(
         f,
         chunks[1],
         &app.snapshot,
         !app.query.query().is_empty(),
         app.error.as_deref(),
+        &app.theme,
     );
 
     if app.mode == Mode::Search {
@@ -441,18 +445,25 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
             &app.search_buffer,
             app.snapshot.services.len(),
             app.filtered_indices.len(),
+            &app.theme,
         );
     }
 
     if app.detail_open {
-        portix_lib::ui::views::detail_panel::render(f, f.area(), app.selected_service());
+        portix_lib::ui::views::detail_panel::render(f, f.area(), app.selected_service(), &app.theme);
     }
 
     if let Some(signal) = app.pending_kill() {
-        portix_lib::ui::views::confirm_modal::render(f, f.area(), app.selected_service(), signal);
+        portix_lib::ui::views::confirm_modal::render(
+            f,
+            f.area(),
+            app.selected_service(),
+            signal,
+            &app.theme,
+        );
     }
 
     if app.show_help() {
-        portix_lib::ui::views::help::render(f, f.area(), &app.snapshot.degradations);
+        portix_lib::ui::views::help::render(f, f.area(), &app.snapshot.degradations, &app.theme);
     }
 }
