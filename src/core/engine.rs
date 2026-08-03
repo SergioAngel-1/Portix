@@ -78,6 +78,10 @@ impl Engine {
         let mut live = HashSet::new();
         let mut services = Vec::new();
         let mut unresolved = 0usize;
+        // Sockets whose PID we found but whose /proc metadata we could not read
+        // (another user's process, or it exited mid-scan). Counted per distinct
+        // PID via the `seen` memo below, not per socket.
+        let mut partial_reads = 0usize;
 
         // One process can own several sockets (dual-stack, or tcp+udp like
         // kdeconnectd). Resolve it once per scan: reading /proc twice is waste,
@@ -105,6 +109,11 @@ impl Engine {
                     Some(cached) => cached.clone(),
                     None => {
                         let resolved = self.resolve_process(pid, total_jiffies, &mut live);
+                        // A known PID we could not read is a partial read, not an
+                        // unattributed socket: the difference is worth reporting.
+                        if resolved.is_none() {
+                            partial_reads += 1;
+                        }
                         seen.insert(pid, resolved.clone());
                         resolved
                     }
@@ -154,6 +163,9 @@ impl Engine {
 
         if unresolved > 0 {
             degradations.push(Degradation::SocketsWithoutPid(unresolved));
+        }
+        if partial_reads > 0 {
+            degradations.push(Degradation::ProcessesPartialRead(partial_reads));
         }
 
         self.cache.retain_live(&live);

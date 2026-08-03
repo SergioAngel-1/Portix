@@ -8,12 +8,8 @@ use std::time::Instant;
 pub enum Degradation {
     /// N sockets couldn't be resolved to a PID (permission issue)
     SocketsWithoutPid(usize),
-    /// N processes couldn't be fully read
+    /// N processes were found by PID but couldn't be read from /proc
     ProcessesPartialRead(usize),
-    /// N projects couldn't be detected
-    ProjectDetectionFailed(usize),
-    /// Network namespace scanning unavailable
-    NetnsUnavailable,
     /// The scan itself failed before any socket could be listed.
     ScanFailed(String),
 }
@@ -30,14 +26,24 @@ impl Degradation {
             Degradation::ProcessesPartialRead(n) => {
                 format!("{} processes couldn't be fully read.", n)
             }
-            Degradation::ProjectDetectionFailed(n) => {
-                format!("{} projects couldn't be detected.", n)
-            }
-            Degradation::NetnsUnavailable => {
-                "Network namespace scanning unavailable. Containers may not be visible.".to_string()
-            }
             Degradation::ScanFailed(msg) => format!("Scan failed: {msg}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_partial_read_message_is_distinct_from_unresolved() {
+        assert_eq!(
+            Degradation::ProcessesPartialRead(3).message(),
+            "3 processes couldn't be fully read."
+        );
+        assert!(Degradation::SocketsWithoutPid(3)
+            .message()
+            .contains("other users"));
     }
 }
 
