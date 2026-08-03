@@ -1,145 +1,246 @@
-use crate::model::Service;
+use crate::model::{BindScope, Service};
+use crate::ui::format::{cell, format_bytes, format_uptime};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
-/// Render the detail panel for a service.
-pub fn render(f: &mut Frame, area: Rect, service: &Service) {
-    let block = Block::default()
-        .title(format!(" {} ", service.socket.url()))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
+/// Colour for the fixed-width field labels down the left of each row.
+const LABEL: Color = Color::DarkGray;
 
-    let mut lines = Vec::new();
+/// Render the info panel for the selected service as a centered modal overlay.
+///
+/// Everything drawn here that comes from the system — command line, paths,
+/// project and container names — is attacker-controlled and passes through
+/// `format::cell`, the mandatory sanitisation chokepoint (PRD §13.2). A process
+/// with `argv[0] = "\x1b]0;pwned\x07"` must not hijack the terminal from here.
+pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>) {
+    let area = centered_rect(66, 84, area);
+    f.render_widget(Clear, area);
 
-    // Framework section
-    if let Some(ref framework) = service.framework {
+    let Some(service) = service else {
+        let block = Block::default()
+            .title(" Info ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Gray));
+        f.render_widget(
+            Paragraph::new("No service selected.").block(block),
+            area,
+        );
+        return;
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Framework (only when something was actually detected).
+    if let Some(fw) = &service.framework {
         lines.push(Line::from(vec![
             Span::styled(
-                framework.confidence.glyph().to_string(),
+                fw.confidence.glyph().to_string(),
                 Style::default().fg(Color::Green),
             ),
             Span::raw(" "),
             Span::styled(
-                &framework.display_name,
+                cell(&fw.display_name),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(" {}", framework.version.as_deref().unwrap_or(""))),
+            Span::raw(format!(" {}", fw.version.as_deref().unwrap_or(""))),
+            Span::styled(
+                format!("  ({})", fw.confidence.display()),
+                Style::default().fg(LABEL),
+            ),
         ]));
+        if !fw.matched_signals.is_empty() {
+            lines.push(kv(
+                "Evidence",
+                cell(&fw.matched_signals.join(", ")),
+            ));
+        }
+        lines.push(blank());
     }
 
-    lines.push(Line::raw(""));
-
-    // Project section
-    lines.push(Line::from(Span::styled(
-        "PROJECT",
-        Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    if let Some(ref project) = service.project {
-        lines.push(Line::from(vec![
-            Span::styled("  Name     ", Style::default().fg(Color::Gray)),
-            Span::raw(&project.name),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  Route    ", Style::default().fg(Color::Gray)),
-            Span::raw(project.root.to_string_lossy()),
-        ]));
-        if let Some(ref ws) = project.workspace_root {
-            lines.push(Line::from(vec![
-                Span::styled("  Workspace", Style::default().fg(Color::Gray)),
-                Span::raw(ws.to_string_lossy()),
-            ]));
+    // Project.
+    lines.push(section("PROJECT"));
+    if let Some(project) = &service.project {
+        lines.push(kv("Name", cell(&project.name)));
+        if let Some(tech) = &project.technical_name {
+            lines.push(kv("Package", cell(tech)));
+        }
+        lines.push(kv("Route", cell(&project.root.to_string_lossy())));
+        if let Some(ws) = &project.workspace_root {
+            lines.push(kv("Workspace", cell(&ws.to_string_lossy())));
+        }
+        if let Some(lang) = &project.language {
+            lines.push(kv("Language", cell(lang)));
+        }
+        if let Some(pm) = &project.package_manager {
+            lines.push(kv("Manager", pm.display().to_string()));
         }
     } else {
-        lines.push(Line::from(Span::styled(
-            "  —",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(dash());
     }
+    lines.push(blank());
 
-    lines.push(Line::raw(""));
-
-    // Process section
-    lines.push(Line::from(Span::styled(
-        "PROCESS",
-        Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    if let Some(ref process) = service.process {
-        lines.push(Line::from(vec![
-            Span::styled("  PID      ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}", process.pid)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  User     ", Style::default().fg(Color::Gray)),
-            Span::raw(process.user.as_deref().unwrap_or("—")),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  State    ", Style::default().fg(Color::Gray)),
-            Span::raw(process.state.display()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  Threads  ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}", process.threads)),
-        ]));
-        if let Some(ref exe) = process.exe {
-            lines.push(Line::from(vec![
-                Span::styled("  Exec     ", Style::default().fg(Color::Gray)),
-                Span::raw(exe.to_string_lossy()),
-            ]));
+    // Process.
+    lines.push(section("PROCESS"));
+    if let Some(p) = &service.process {
+        lines.push(kv("Command", cell(&p.command_display())));
+        lines.push(kv("PID", p.pid.to_string()));
+        lines.push(kv("PPID", p.ppid.to_string()));
+        lines.push(kv("User", cell(p.user.as_deref().unwrap_or("—"))));
+        lines.push(kv("State", p.state.display().to_string()));
+        lines.push(kv("Threads", p.threads.to_string()));
+        lines.push(kv(
+            "CPU",
+            p.metrics
+                .cpu_percent
+                .map(|c| format!("{c:.1}%"))
+                .unwrap_or_else(|| "—".into()),
+        ));
+        lines.push(kv("Memory", memory_line(p)));
+        lines.push(kv(
+            "Uptime",
+            p.metrics
+                .uptime
+                .map(format_uptime)
+                .unwrap_or_else(|| "—".into()),
+        ));
+        if let Some(exe) = &p.exe {
+            lines.push(kv("Exec", cell(&exe.to_string_lossy())));
         }
-        if let Some(ref cwd) = process.cwd {
-            lines.push(Line::from(vec![
-                Span::styled("  CWD      ", Style::default().fg(Color::Gray)),
-                Span::raw(cwd.to_string_lossy()),
-            ]));
+        if let Some(cwd) = &p.cwd {
+            lines.push(kv("CWD", cell(&cwd.to_string_lossy())));
         }
     } else {
-        lines.push(Line::from(Span::styled(
-            "  — (no permission or process exited)",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(dash_msg("— (no permission, or the process exited)"));
+    }
+    lines.push(blank());
+
+    // Container (only when detected).
+    if let Some(c) = &service.container {
+        lines.push(section("CONTAINER"));
+        lines.push(kv("Runtime", c.runtime.display().to_string()));
+        lines.push(kv("ID", cell(&c.id)));
+        if let Some(name) = &c.name {
+            lines.push(kv("Name", cell(name)));
+        }
+        if let Some(compose) = &c.compose_project {
+            lines.push(kv("Compose", cell(compose)));
+        }
+        lines.push(blank());
     }
 
-    lines.push(Line::raw(""));
+    // Socket.
+    lines.push(section("SOCKET"));
+    lines.push(kv("URL", service.socket.url()));
+    lines.push(kv("Listen", listen_addr(service)));
+    lines.push(kv("Protocol", service.socket.proto_display()));
+    lines.push(kv("Scope", bind_scope_label(&service.socket.bind_scope)));
+    lines.push(kv("Inode", service.socket.inode.to_string()));
+    lines.push(kv("Owner", format!("uid {}", service.socket.uid)));
+    if service.socket.dual_stack {
+        lines.push(kv("Dual-stack", "IPv4 + IPv6".to_string()));
+    }
 
-    // Socket section
+    lines.push(blank());
     lines.push(Line::from(Span::styled(
-        "SOCKET",
-        Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
+        "  Esc / i to close",
+        Style::default().fg(LABEL),
     )));
-    lines.push(Line::from(vec![
-        Span::styled("  Listen   ", Style::default().fg(Color::Gray)),
-        Span::raw(format!(
-            "[::]:{} ({})",
-            service.socket.port, service.socket.protocol
-        )),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Scope    ", Style::default().fg(Color::Gray)),
-        Span::raw(format!("{:?}", service.socket.bind_scope)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Inode    ", Style::default().fg(Color::Gray)),
-        Span::raw(format!("{}", service.socket.inode)),
-    ]));
 
-    let paragraph = Paragraph::new(Text::from(lines))
+    let title = format!(" :{}  {} ", service.socket.port, service.socket.proto_display());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    // Wrap so long command lines and paths fold inside the modal.
+    let paragraph = Paragraph::new(lines)
         .block(block)
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
+}
+
+/// `RSS` alone, or `RSS / VIRT` when the virtual size is known too.
+fn memory_line(p: &crate::model::Process) -> String {
+    match (p.metrics.rss_bytes, p.metrics.virt_bytes) {
+        (Some(rss), Some(virt)) => format!("{} / {} virt", format_bytes(rss), format_bytes(virt)),
+        (Some(rss), None) => format_bytes(rss),
+        _ => "—".to_string(),
+    }
+}
+
+/// The real listen address, bracketing IPv6 the standard way (`[::]:7777`)
+/// rather than the ambiguous `:::7777`. Fixes the old hardcoded `[::]:{port}`
+/// that ignored the actual address.
+fn listen_addr(service: &Service) -> String {
+    use std::net::IpAddr;
+    match service.socket.local_addr {
+        IpAddr::V4(v4) => format!("{v4}:{}", service.socket.port),
+        IpAddr::V6(v6) => format!("[{v6}]:{}", service.socket.port),
+    }
+}
+
+/// Human-readable bind scope, replacing the old `{:?}` Debug output.
+fn bind_scope_label(scope: &BindScope) -> String {
+    match scope {
+        BindScope::Loopback => "loopback (localhost only)".to_string(),
+        BindScope::AllInterfaces => "all interfaces".to_string(),
+        BindScope::Specific(ip) => ip.to_string(),
+    }
+}
+
+fn section(title: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        title.to_string(),
+        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// A `label   value` row with the label in a fixed-width gutter.
+fn kv(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {label:<9} "), Style::default().fg(LABEL)),
+        Span::raw(value),
+    ])
+}
+
+fn dash() -> Line<'static> {
+    dash_msg("  —")
+}
+
+fn dash_msg(msg: &str) -> Line<'static> {
+    Line::from(Span::styled(msg.to_string(), Style::default().fg(LABEL)))
+}
+
+fn blank() -> Line<'static> {
+    Line::raw("")
+}
+
+/// Create a centered rectangle covering `percent_x` × `percent_y` of `r`.
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }

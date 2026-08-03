@@ -28,7 +28,7 @@ pub fn render(f: &mut Frame, area: Rect, degradations: &[Degradation]) {
         )),
         Line::from(vec![Span::raw("  ↑ k        up              g   first")]),
         Line::from(vec![Span::raw("  ↓ j        down            G   last")]),
-        Line::from(vec![Span::raw("  Enter l    details         h   close")]),
+        Line::from(vec![Span::raw("  i Enter l  info            h   close")]),
         Line::raw(""),
         Line::from(Span::styled(
             "SEARCH & FILTER",

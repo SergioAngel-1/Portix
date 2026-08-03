@@ -85,7 +85,9 @@ impl App {
                         self.set_query("");
                     }
                 }
-                KeyCode::Enter | KeyCode::Char('l') => self.detail_open = !self.detail_open,
+                KeyCode::Char('i') | KeyCode::Enter | KeyCode::Char('l') => {
+                    self.detail_open = !self.detail_open
+                }
                 KeyCode::Char('h') => self.detail_open = false,
                 KeyCode::Up | KeyCode::Char('k') => self.move_up(),
                 KeyCode::Down | KeyCode::Char('j') => self.move_down(),
@@ -325,6 +327,25 @@ mod tests {
         app.config.kill_confirm = false;
         let effects = app.handle_key(key('x'));
         assert!(matches!(effects[0], Effect::Kill(_, Signal::Term)));
+    }
+
+    #[test]
+    fn test_i_toggles_the_info_panel() {
+        let mut app = app_with_services(1);
+        assert!(!app.detail_open);
+        assert!(app.handle_key(key('i')).is_empty());
+        assert!(app.detail_open, "i opens the info panel");
+        app.handle_key(key('i'));
+        assert!(!app.detail_open, "i again closes it");
+    }
+
+    #[test]
+    fn test_esc_closes_the_info_panel_before_clearing_search() {
+        let mut app = app_with_services(1);
+        app.handle_key(key('i'));
+        assert!(app.detail_open);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.detail_open, "Esc closes the panel first");
     }
 
     #[test]

@@ -10,7 +10,7 @@ use ratatui::{
 /// dropped when the terminal is too narrow to show them all: it is the way to
 /// reach the full shortcut list, so losing it would strand the user.
 const HINTS: &[(&str, &str)] = &[
-    ("↵", "details"),
+    ("i", "info"),
     ("x", "kill"),
     ("o", "open"),
     ("y", "copy"),
