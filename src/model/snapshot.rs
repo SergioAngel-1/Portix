@@ -12,6 +12,9 @@ pub enum Degradation {
     ProcessesPartialRead(usize),
     /// The scan itself failed before any socket could be listed.
     ScanFailed(String),
+    /// A container runtime appears active, but its published ports may be
+    /// hidden from `/proc/net` because its userland-proxy is disabled.
+    ContainerPortsHidden(String),
 }
 
 impl Degradation {
@@ -27,6 +30,9 @@ impl Degradation {
                 format!("{} processes couldn't be fully read.", n)
             }
             Degradation::ScanFailed(msg) => format!("Scan failed: {msg}"),
+            Degradation::ContainerPortsHidden(msg) => {
+                format!("Container ports may be hidden: {msg}")
+            }
         }
     }
 }

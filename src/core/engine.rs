@@ -1,5 +1,6 @@
 use crate::cache::store::CpuSample;
 use crate::cache::CacheStore;
+use crate::core::container_warning::detect_container_warning;
 use crate::core::docker_proxy::rewrite_docker_proxy;
 use crate::core::Config;
 use crate::detect::project::{detect_project, manifest_mtime};
@@ -50,6 +51,16 @@ impl Engine {
 
         self.platform
             .signal(process.pid, process.starttime_jiffies, sig)
+    }
+
+    /// Resolve the service currently listening on `port` from a fresh scan.
+    ///
+    /// This is the only safe way to turn a port into a kill target: the
+    /// snapshot the UI holds can be seconds old, and the process behind a port
+    /// may have exited and been replaced in that window.
+    pub fn service_on_port(&mut self, port: u16) -> Result<Option<Service>> {
+        let snapshot = self.scan()?;
+        Ok(snapshot.by_port(port).cloned())
     }
 
     /// Perform a full scan and return a snapshot.
@@ -163,6 +174,10 @@ impl Engine {
             });
 
             rewrite_docker_proxy(services.last_mut().unwrap());
+        }
+
+        if let Some(deg) = detect_container_warning(self.platform.proc_root()) {
+            degradations.push(deg);
         }
 
         if unresolved > 0 {

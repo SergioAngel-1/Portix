@@ -281,8 +281,6 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
         );
         io::Write::flush(&mut io::stderr())?;
 
-        // Only an explicit yes proceeds. A bare Enter, EOF, or anything else
-        // cancels: this prompt is the last thing between the user and SIGKILL.
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if !matches!(input.trim(), "y" | "Y" | "yes") {
@@ -292,7 +290,16 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
     }
 
     let signal = if force { Signal::Kill } else { Signal::Term };
-    engine.signal_service(service, signal)?;
+    // The snapshot can be seconds old. Re-resolve from a fresh scan so the
+    // signal targets the process currently on this port, not a ghost.
+    let service = match engine.service_on_port(port)? {
+        Some(s) => s,
+        None => {
+            eprintln!("No service listening on port {port} anymore");
+            return Ok(exit::NO_MATCH);
+        }
+    };
+    engine.signal_service(&service, signal)?;
     eprintln!("Sent {signal:?} to service on port {port}");
     Ok(exit::OK)
 }
@@ -388,11 +395,18 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             }
         }
 
-        Effect::Kill(id, signal) => {
-            let service = app.snapshot.services.iter().find(|s| s.id == id).cloned();
+        Effect::Kill(port, signal) => {
+            // The snapshot the UI holds can be seconds old: a process may have
+            // exited and another bound the same port in that window. Re-resolve
+            // from a fresh scan so we signal the current owner, not a ghost.
+            let service = match engine.service_on_port(port) {
+                Ok(s) => s,
+                Err(e) => {
+                    app.error = Some(e.to_string());
+                    return ControlFlow::Continue;
+                }
+            };
             match service {
-                // Errors here are the TOCTOU guard refusing to signal a recycled
-                // PID. That must be visible, not swallowed.
                 Some(service) => {
                     if let Err(e) = engine.signal_service(&service, signal) {
                         app.error = Some(e.to_string());

@@ -14,8 +14,8 @@ pub fn container_of(proc_root: &Path, pid: i32) -> Option<Container> {
             }
         }
 
-        // Try v1 format: "n:subsystem:/docker/..."
-        if let Some(rest) = line.split_once(':').map(|x| x.1) {
+        // Try v1 format: "hierarchy:subsystem-list:cgroup-path"
+        if let Some(rest) = line.splitn(3, ':').nth(2) {
             if let Some(container) = parse_cgroup_path(rest) {
                 return Some(container);
             }
@@ -45,6 +45,32 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
         if !id.is_empty() {
             return Some(Container {
                 runtime: Runtime::Docker,
+                id: id.to_string(),
+                name: None,
+                compose_project: None,
+            });
+        }
+    }
+
+    // Podman v1: /libpod/<64hex>
+    if let Some(rest) = path.strip_prefix("/libpod/") {
+        let id = rest.trim_end_matches('/');
+        if !id.is_empty() {
+            return Some(Container {
+                runtime: Runtime::Podman,
+                id: id.to_string(),
+                name: None,
+                compose_project: None,
+            });
+        }
+    }
+
+    // containerd v1: /cri-containerd/<64hex>
+    if let Some(rest) = path.strip_prefix("/cri-containerd/") {
+        let id = rest.trim_end_matches('/');
+        if !id.is_empty() {
+            return Some(Container {
+                runtime: Runtime::Containerd,
                 id: id.to_string(),
                 name: None,
                 compose_project: None,
@@ -96,6 +122,37 @@ mod tests {
         let path = "/docker/3f2a9c1b8e7d6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a";
         let container = parse_cgroup_path(path).unwrap();
         assert_eq!(container.runtime, Runtime::Docker);
+    }
+
+    /// cgroup v1 line: "1:cpu,cpuacct:/docker/abc123"
+    /// `splitn(3, ':').nth(2)` must extract "/docker/abc123", not "cpu,cpuacct:/docker/...".
+    #[test]
+    fn test_parse_docker_v1_full_line() {
+        let line = "1:cpu,cpuacct:/docker/3f2a9c1b8e7d6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a";
+        let rest = line.splitn(3, ':').nth(2).unwrap();
+        assert!(rest.starts_with("/docker/"));
+        let container = parse_cgroup_path(rest).unwrap();
+        assert_eq!(container.runtime, Runtime::Docker);
+    }
+
+    /// cgroup v1 line: "2:cpu:/libpod/abc123"
+    #[test]
+    fn test_parse_podman_v1() {
+        let line = "2:cpu:/libpod/abc123";
+        let rest = line.splitn(3, ':').nth(2).unwrap();
+        assert!(rest.starts_with("/libpod/"));
+        let container = parse_cgroup_path(rest).unwrap();
+        assert_eq!(container.runtime, Runtime::Podman);
+    }
+
+    /// cgroup v1 line: "3:cpu,cpuacct:/cri-containerd/abc123"
+    #[test]
+    fn test_parse_containerd_v1() {
+        let line = "3:cpu,cpuacct:/cri-containerd/abc123";
+        let rest = line.splitn(3, ':').nth(2).unwrap();
+        assert!(rest.starts_with("/cri-containerd/"));
+        let container = parse_cgroup_path(rest).unwrap();
+        assert_eq!(container.runtime, Runtime::Containerd);
     }
 
     #[test]

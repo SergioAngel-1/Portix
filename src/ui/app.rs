@@ -1,6 +1,6 @@
 use crate::core::query::Query;
 use crate::core::Config;
-use crate::model::{Service, ServiceId, SharedSnapshot, Signal, Snapshot};
+use crate::model::{Service, SharedSnapshot, Signal, Snapshot};
 use crate::ui::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::Arc;
@@ -162,7 +162,7 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('n') => self.mode = Mode::Normal,
                 KeyCode::Enter | KeyCode::Char('y') => {
                     if let Some(service) = self.selected_service() {
-                        effects.push(Effect::Kill(service.id.clone(), signal));
+                        effects.push(Effect::Kill(service.socket.port, signal));
                     }
                     self.mode = Mode::Normal;
                 }
@@ -228,7 +228,7 @@ impl App {
         if self.config.kill_confirm {
             self.mode = Mode::ConfirmKill(signal);
         } else {
-            effects.push(Effect::Kill(service.id.clone(), signal));
+            effects.push(Effect::Kill(service.socket.port, signal));
         }
     }
 
@@ -279,7 +279,8 @@ impl App {
 pub enum Effect {
     Quit,
     OpenBrowser(String),
-    Kill(ServiceId, Signal),
+    /// Kill the service currently listening on `port`.
+    Kill(u16, Signal),
     CopyToClipboard(String),
     Refresh,
     /// Persist the current config (theme) to disk.
@@ -289,7 +290,7 @@ pub enum Effect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BindScope, Process, ProcessState, Protocol, Socket, TcpState};
+    use crate::model::{BindScope, Process, ProcessState, Protocol, ServiceId, Socket, TcpState};
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::from(KeyCode::Char(c))

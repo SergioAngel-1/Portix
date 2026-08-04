@@ -30,9 +30,10 @@ impl DockerProxyInfo {
         let args = cmdline.iter().map(String::as_str).collect::<Vec<_>>();
         for (i, arg) in args.iter().enumerate() {
             let mut rest = *arg;
-            if let Some(stripped) = rest.strip_prefix('-') {
-                rest = stripped;
-            }
+            // docker-proxy flags may be single-dash (`-proto`) or double-dash
+            // (`--container-ip`); strip all leading dashes so the name matches
+            // regardless of how many the binary emits.
+            rest = rest.trim_start_matches('-');
 
             if rest == "container-ip"
                 || rest.starts_with("container-ip=")
@@ -171,6 +172,46 @@ mod tests {
         rewrite_docker_proxy(&mut service);
         assert!(!service.docker_proxy_rewritten);
         assert!(service.project.is_some());
+    }
+
+    #[test]
+    fn test_docker_proxy_double_dash_equals_form() {
+        let mut service = docker_proxy_service(&[
+            "/usr/bin/docker-proxy",
+            "--proto",
+            "tcp",
+            "--host-ip=0.0.0.0",
+            "--host-port=5432",
+            "--container-ip=172.17.0.2",
+            "--container-port=5432",
+        ]);
+        rewrite_docker_proxy(&mut service);
+        assert!(service.docker_proxy_rewritten);
+        assert_eq!(service.container.as_ref().unwrap().id, "172.17.0.2");
+        assert_eq!(
+            service.container.as_ref().unwrap().runtime,
+            crate::model::Runtime::Docker
+        );
+    }
+
+    #[test]
+    fn test_docker_proxy_double_dash_separated_form() {
+        let mut service = docker_proxy_service(&[
+            "/usr/bin/docker-proxy",
+            "--proto",
+            "tcp",
+            "--host-ip",
+            "0.0.0.0",
+            "--host-port",
+            "5432",
+            "--container-ip",
+            "172.17.0.2",
+            "--container-port",
+            "5432",
+        ]);
+        rewrite_docker_proxy(&mut service);
+        assert!(service.docker_proxy_rewritten);
+        assert_eq!(service.container.as_ref().unwrap().id, "172.17.0.2");
     }
 
     #[test]
