@@ -20,4 +20,3 @@ pub mod detect;
 pub mod model;
 pub mod platform;
 pub mod ui;
-pub mod util;
