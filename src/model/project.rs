@@ -17,7 +17,6 @@ pub enum PackageManager {
     Gem,
     Mix,
     Pub,
-    Unknown,
 }
 
 impl PackageManager {
@@ -36,7 +35,6 @@ impl PackageManager {
             PackageManager::Gem => "gem",
             PackageManager::Mix => "mix",
             PackageManager::Pub => "pub",
-            PackageManager::Unknown => "—",
         }
     }
 }
@@ -76,23 +74,5 @@ impl Project {
             }
         }
         root_str.to_string()
-    }
-}
-
-/// Confidence level for project detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub enum Confidence {
-    Low,
-    Medium,
-    High,
-}
-
-impl Confidence {
-    pub fn display(&self) -> &str {
-        match self {
-            Confidence::Low => "Low",
-            Confidence::Medium => "Medium",
-            Confidence::High => "High",
-        }
     }
 }

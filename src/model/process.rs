@@ -159,7 +159,6 @@ pub struct ProcessKey {
 pub enum Signal {
     Term,
     Kill,
-    Interrupt,
 }
 
 #[cfg(test)]

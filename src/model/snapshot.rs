@@ -1,7 +1,6 @@
 use crate::model::Service;
 use serde::Serialize;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Reasons why some data couldn't be obtained.
 #[derive(Debug, Clone, Serialize)]
@@ -55,15 +54,14 @@ mod tests {
 
 /// Immutable snapshot of the world at a point in time.
 ///
-/// This is produced by the collector thread and consumed by the UI thread.
-/// The UI replaces the Arc pointer atomically - no shared state, no locks.
+/// Produced by `Engine::scan()` — which runs synchronously on the caller's
+/// thread in the current MVP (the collector-thread design of PRD §10.3 is not
+/// implemented) — and passed to the UI as an `Arc` so snapshot updates are a
+/// cheap pointer swap.
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
     /// All detected services
     pub services: Vec<Service>,
-    /// Monotonic instant the scan started; not meaningful outside this process.
-    #[serde(skip)]
-    pub taken_at: Instant,
     /// Wall-clock time of the scan, for JSON consumers.
     pub taken_at_epoch_secs: u64,
     /// How long the scan took (as milliseconds)

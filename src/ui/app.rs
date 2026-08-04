@@ -53,7 +53,6 @@ impl App {
             mode: Mode::Normal,
             snapshot: Arc::new(Snapshot {
                 services: Vec::new(),
-                taken_at: std::time::Instant::now(),
                 taken_at_epoch_secs: 0,
                 scan_duration_ms: 0,
                 degradations: Vec::new(),
@@ -372,7 +371,6 @@ mod tests {
         let mut app = App::new(Config::default(), Theme::default_dark(), true);
         app.update_snapshot(Arc::new(Snapshot {
             services,
-            taken_at: std::time::Instant::now(),
             taken_at_epoch_secs: 0,
             scan_duration_ms: 1,
             degradations: Vec::new(),
@@ -539,7 +537,6 @@ mod tests {
         app.selected = 2;
         app.update_snapshot(Arc::new(Snapshot {
             services: Vec::new(),
-            taken_at: std::time::Instant::now(),
             taken_at_epoch_secs: 0,
             scan_duration_ms: 1,
             degradations: Vec::new(),

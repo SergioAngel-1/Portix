@@ -32,6 +32,9 @@ toml = "0.8"
 # Fuzzy matching
 nucleo-matcher = "0.3"
 
+# Terminal column widths for layout fitting
+unicode-width = "0.2"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

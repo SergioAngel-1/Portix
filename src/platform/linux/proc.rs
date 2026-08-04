@@ -74,16 +74,6 @@ pub fn read_starttime_jiffies(proc_root: &Path, pid: i32) -> Option<u64> {
     read_stat(proc_root, &pid_dir).map(|s| s.starttime_jiffies)
 }
 
-/// Read the UID owning a process from /proc/<pid>/status.
-pub fn read_uid(proc_root: &Path, pid: i32) -> Option<u32> {
-    let content = std::fs::read_to_string(proc_root.join(pid.to_string()).join("status")).ok()?;
-    content
-        .lines()
-        .find_map(|l| l.strip_prefix("Uid:"))
-        .and_then(|v| v.split_whitespace().next())
-        .and_then(|s| s.parse().ok())
-}
-
 /// Read the UID of the calling process, honoring the injected proc root.
 pub fn current_uid(proc_root: &Path) -> Option<u32> {
     let content = std::fs::read_to_string(proc_root.join("self").join("status")).ok()?;

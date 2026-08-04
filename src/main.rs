@@ -41,6 +41,10 @@ struct Cli {
     #[arg(value_name = "PORT", value_parser = parse_port)]
     port: Option<u16>,
 
+    /// Show service for a specific port (long form, PRD §12.2)
+    #[arg(long = "port", value_name = "PORT", value_parser = parse_port, conflicts_with = "port")]
+    port_flag: Option<u16>,
+
     /// Output JSON
     #[arg(long)]
     json: bool,
@@ -135,15 +139,19 @@ fn run() -> Result<i32> {
     }
 
     let proc_root = cli.proc_root.as_deref().map(std::path::Path::new);
-    let mut engine = Engine::new(proc_root, config.clone())?;
+    let mut engine = Engine::new(proc_root, config.clone());
+
+    // `portix 3000`, `portix :3000`, and `portix --port 3000` are the same
+    // query (PRD §12.2); clap forbids passing both.
+    let port = cli.port.or(cli.port_flag);
 
     if let Some(port) = cli.kill {
         return kill_port(&mut engine, port, cli.force, cli.yes);
     }
     if cli.json {
-        return print_json(&mut engine, cli.port);
+        return print_json(&mut engine, port);
     }
-    if let Some(port) = cli.port {
+    if let Some(port) = port {
         return print_port(&mut engine, port);
     }
     if cli.once {
@@ -162,14 +170,14 @@ fn use_color(cli: &Cli) -> bool {
 
 /// CPU needs two samples to produce a delta. A one-shot invocation would print
 /// a dash for every row, so take a throwaway scan and wait one interval.
-fn scan_with_cpu(engine: &mut Engine) -> Result<SharedSnapshot> {
-    engine.scan()?;
+fn scan_with_cpu(engine: &mut Engine) -> SharedSnapshot {
+    engine.scan();
     std::thread::sleep(Duration::from_millis(200));
     engine.scan()
 }
 
 fn print_json(engine: &mut Engine, port: Option<u16>) -> Result<i32> {
-    let snapshot = scan_with_cpu(engine)?;
+    let snapshot = scan_with_cpu(engine);
 
     // stdout carries JSON and nothing else; warnings go to stderr.
     match port {
@@ -203,7 +211,7 @@ fn print_json(engine: &mut Engine, port: Option<u16>) -> Result<i32> {
 }
 
 fn print_port(engine: &mut Engine, port: u16) -> Result<i32> {
-    let snapshot = scan_with_cpu(engine)?;
+    let snapshot = scan_with_cpu(engine);
     let Some(service) = snapshot.by_port(port) else {
         eprintln!("No service listening on port {port}");
         return Ok(exit::NO_MATCH);
@@ -224,7 +232,7 @@ fn print_port(engine: &mut Engine, port: u16) -> Result<i32> {
 }
 
 fn print_table(engine: &mut Engine) -> Result<i32> {
-    let snapshot = scan_with_cpu(engine)?;
+    let snapshot = scan_with_cpu(engine);
 
     println!(
         "{:<6} {:<6} {:<20} {:<18} {:<18} {:>7} {:>7} {:>7} {:>8}",
@@ -267,7 +275,7 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
     // Fresh scan up front: both the confirmation text and the signal must
     // describe the process that owns the port *now*, not a seconds-old
     // snapshot. (CPU columns are irrelevant here, so a single scan suffices.)
-    let Some(service) = engine.service_on_port(port)? else {
+    let Some(service) = engine.service_on_port(port) else {
         eprintln!("No service listening on port {port}");
         return Ok(exit::NO_MATCH);
     };
@@ -296,7 +304,7 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
     let signal = if force { Signal::Kill } else { Signal::Term };
     // The user may have taken seconds to answer; re-resolve from a fresh scan
     // so the signal targets the process currently on this port, not a ghost.
-    let service = match engine.service_on_port(port)? {
+    let service = match engine.service_on_port(port) {
         Some(s) => s,
         None => {
             eprintln!("No service listening on port {port} anymore");
@@ -338,7 +346,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     color: bool,
 ) -> Result<()> {
     let mut app = App::new(config.clone(), theme, color);
-    app.update_snapshot(engine.scan()?);
+    app.update_snapshot(engine.scan());
 
     let refresh = Duration::from_millis(config.min_refresh_ms());
     let mut last_scan = Instant::now();
@@ -368,10 +376,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         }
 
         if last_scan.elapsed() >= refresh {
-            match engine.scan() {
-                Ok(snapshot) => app.update_snapshot(snapshot),
-                Err(e) => app.error = Some(e.to_string()),
-            }
+            app.update_snapshot(engine.scan());
             last_scan = Instant::now();
         }
     }
@@ -404,9 +409,8 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             // the snapshot the UI holds can be seconds old, and the modal must
             // describe the process that owns the port *now*.
             match engine.service_on_port(port) {
-                Ok(Some(service)) => app.arm_kill(service, signal),
-                Ok(None) => app.error = Some(format!("no service listening on port {port}")),
-                Err(e) => app.error = Some(e.to_string()),
+                Some(service) => app.arm_kill(service, signal),
+                None => app.error = Some(format!("no service listening on port {port}")),
             }
         }
 
@@ -414,14 +418,7 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             // The snapshot the UI holds can be seconds old: a process may have
             // exited and another bound the same port in that window. Re-resolve
             // from a fresh scan so we signal the current owner, not a ghost.
-            let service = match engine.service_on_port(port) {
-                Ok(s) => s,
-                Err(e) => {
-                    app.error = Some(e.to_string());
-                    return ControlFlow::Continue;
-                }
-            };
-            match service {
+            match engine.service_on_port(port) {
                 Some(service) => {
                     if let Err(e) = engine.signal_service(&service, signal) {
                         app.error = Some(e.to_string());
@@ -431,10 +428,7 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             }
         }
 
-        Effect::Refresh => match engine.scan() {
-            Ok(snapshot) => app.update_snapshot(snapshot),
-            Err(e) => app.error = Some(e.to_string()),
-        },
+        Effect::Refresh => app.update_snapshot(engine.scan()),
 
         Effect::PersistConfig => {
             if let Err(e) = app.config.save_theme() {

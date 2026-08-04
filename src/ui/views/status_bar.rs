@@ -182,10 +182,12 @@ fn hint_spans(indices: &[usize], theme: &Theme) -> Vec<Span<'static>> {
     spans
 }
 
-/// Display width of a span run, counting columns rather than bytes so the
-/// multibyte glyphs (`·`, `⚠`) do not throw the layout off.
+/// Display width of a span run, counting terminal columns rather than bytes or
+/// chars, so wide glyphs (`🐳`, `⚠`) and CJK text do not throw the fitting
+/// logic off.
 fn spans_width(spans: &[Span]) -> usize {
-    spans.iter().map(|s| s.content.chars().count()).sum()
+    use unicode_width::UnicodeWidthStr;
+    spans.iter().map(|s| s.content.width()).sum()
 }
 
 #[cfg(test)]

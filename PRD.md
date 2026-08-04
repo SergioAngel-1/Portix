@@ -426,8 +426,8 @@ Cada dependencia es una carga de mantenimiento y una superficie de supply chain.
 **Nota sobre `procfs`:** el crate es cómodo pero asigna agresivamente (`String` por campo) y expone estructuras pesadas que no necesitamos. En el camino caliente (leer `stat` de 500 procesos a 1 Hz) queremos parsear a `&[u8]` con buffers reutilizados y cero asignaciones. **Recomendación: escribir la capa `linux/` a mano** (es ~600 líneas, totalmente testeable con fixtures) y usar `procfs` únicamente como referencia de formatos y en tests como oráculo cruzado. Esto también elimina una dependencia del camino crítico y nos da control total sobre el manejo de errores parciales.
 
 **Higiene de supply chain:**
-- `cargo-deny` en CI: licencias permitidas, avisos de RUSTSEC, duplicados de versión prohibidos.
-- `cargo-audit` en CI y semanalmente vía cron.
+- `cargo-audit` en CI: implementado (job `check` de `.github/workflows/ci.yml`).
+- `cargo-deny` (licencias, duplicados de versión) y el cron semanal de auditoría: pendientes (P2).
 - `Cargo.lock` **comiteado** (es un binario, no una librería).
 - `#![forbid(unsafe_code)]` en todos los módulos excepto `linux/`, donde el `unsafe` (si lo hay) se documenta con un comentario `SAFETY:` obligatorio, revisado por un maintainer.
 - Ninguna dependencia con `build.rs` que descargue nada de la red.
@@ -1597,7 +1597,7 @@ El layout por restricciones de `ratatui` hace esto declarativo, sin aritmética 
 | `[keys]` | — | Remapeo de atajos (v1) |
 | `[detectors]` | — | Habilitar/deshabilitar detectores por id |
 
-**Estado MVP de las claves:** `ascii`, `default_sort`, `memory_metric`, `browser`, `editor` y `docker_socket` están declaradas en `core/config.rs` con sus defaults pero **aún no tienen efecto** — `open_url` (`core/actions.rs`) usa `xdg-open` fijo (no `browser`), el portapapeles va por `wl-copy`/`xclip` (no `arboard`), y `docker_socket` espera a la fase v1.5 de la API de Docker. Se implementan en v1; hasta entonces son inofensivas pero no deben usarse como si funcionaran.
+**Estado MVP de las claves:** `ascii`, `default_sort`, `memory_metric`, `browser`, `editor` y `docker_socket` son funcionalidad de **v1** y no están declaradas en `Config` en el MVP. Serde ignora las claves desconocidas, así que un `config.toml` del usuario que las contenga sigue parseando — simplemente no tienen efecto hasta v1. `open_url` (`core/actions.rs`) usa `xdg-open` fijo, el portapapeles va por `wl-copy`/`xclip`, y `docker_socket` espera a la fase v1.5 de la API de Docker.
 
 ### 12.2 CLI y modo no interactivo
 
@@ -1606,7 +1606,7 @@ Portix es una TUI, pero **un buen ciudadano de Unix** (JS-1 desde un script, y P
 | Invocación | Comportamiento |
 |---|---|
 | `portix` | TUI interactiva |
-| `portix :3000` | Imprime el servicio del puerto 3000 y sale. **Este es el comando que reemplaza a `lsof -i :3000`.** (En MVP solo el posicional acepta `3000` o `:3000`; el alias `--port` queda para v1.) |
+| `portix :3000` / `portix --port 3000` | Imprime el servicio del puerto 3000 y sale. **Este es el comando que reemplaza a `lsof -i :3000`.** Ambas formas son aceptadas (posicional y flag largo); `--port` y el posicional son mutuamente excluyentes. |
 | `portix --json` | Snapshot completo en JSON a stdout, exit 0. Sin TUI. Esquema versionado. |
 | `portix --json :3000` | JSON de un solo servicio |
 | `portix --once` | Un frame de la tabla en texto plano, sin entrar en modo raw |
@@ -1634,7 +1634,7 @@ Portix es una TUI, pero **un buen ciudadano de Unix** (JS-1 desde un script, y P
 - `o` (abrir en navegador), que ejecuta `xdg-open` con una URL de localhost.
 - La comprobación opcional de nuevas versiones, que **está desactivada por defecto y no se activará automáticamente en ninguna versión**.
 
-Esto se declara en el README y se verifica en CI con un test que ejecuta Portix bajo `strace -f -e trace=network` y falla si hay algún `connect()` a algo que no sea `AF_UNIX`.
+Esto se declara en el README y se verifica en CI: el job `no-network` de `.github/workflows/ci.yml` ejecuta Portix bajo `strace -f -e trace=network` contra el fixture y falla si aparece cualquier `connect()` a `AF_INET`/`AF_INET6`.
 
 ### 13.2 Superficie de riesgo
 

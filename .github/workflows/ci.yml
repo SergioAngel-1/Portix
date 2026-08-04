@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Build, lint, test, audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      # PRD §5.4: cargo-audit against the committed Cargo.lock.
+      - name: Audit dependencies
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # PRD §13.1: Portix must never open an outbound network connection.
+  # Run the non-TUI snapshot under strace and fail if any AF_INET/AF_INET6
+  # connect() appears.
+  no-network:
+    name: No outbound network (strace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: strace regression (PRD §13.1)
+        run: |
+          set -euo pipefail
+          command -v strace >/dev/null || { echo "strace unavailable; skipping"; exit 0; }
+          strace -f -e trace=network -o /tmp/net.trace \
+            ./target/debug/portix --once --proc-root tests/fixtures/proc/dual-stack-node \
+            >/dev/null
+          if grep -E "connect\([^)]*AF_(INET|INET6)" /tmp/net.trace; then
+            echo "::error::Portix attempted an outbound network connect()"
+            exit 1
+          fi
+          echo "no outbound network connects"

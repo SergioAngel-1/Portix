@@ -12,8 +12,8 @@ fn fixture_root(name: &str) -> PathBuf {
 #[test]
 fn test_dual_stack_fixture_collapses_to_one_service() {
     let root = fixture_root("dual-stack-node");
-    let mut engine = Engine::new(Some(&root), Config::default()).expect("engine");
-    let snapshot = engine.scan().expect("scan");
+    let mut engine = Engine::new(Some(&root), Config::default());
+    let snapshot = engine.scan();
 
     assert_eq!(snapshot.services.len(), 1, "expected one merged service");
     let service = &snapshot.services[0];
@@ -44,8 +44,8 @@ fn test_dual_stack_fixture_collapses_to_one_service() {
 #[test]
 fn test_hostile_comm_survives_full_scan() {
     let root = fixture_root("comm-with-parens");
-    let mut engine = Engine::new(Some(&root), Config::default()).expect("engine");
-    let snapshot = engine.scan().expect("scan");
+    let mut engine = Engine::new(Some(&root), Config::default());
+    let snapshot = engine.scan();
 
     assert_eq!(snapshot.services.len(), 1);
     let service = &snapshot.services[0];
@@ -55,12 +55,4 @@ fn test_hostile_comm_survives_full_scan() {
     assert_eq!(process.name, "(evil) 1 2 3");
     assert_eq!(process.ppid, 12340);
     assert_eq!(process.threads, 20);
-}
-
-#[test]
-fn inspect_cwd_symlink() {
-    let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc/dual-stack-node/48213");
-    println!("cwd exists: {}", root.join("cwd").exists());
-    println!("cwd symlink: {:?}", std::fs::read_link(root.join("cwd")));
 }

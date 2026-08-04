@@ -44,10 +44,12 @@ impl Container {
     pub fn display(&self) -> String {
         match &self.name {
             Some(name) => format!("{} {}", self.runtime.glyph(), name),
+            // Char-based truncation: byte slicing could panic if the id ever
+            // carried a multi-byte character (today it is hex or an IP).
             None => format!(
                 "{} {}",
                 self.runtime.glyph(),
-                &self.id[..12.min(self.id.len())]
+                self.id.chars().take(12).collect::<String>()
             ),
         }
     }

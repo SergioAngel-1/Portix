@@ -12,11 +12,11 @@ use std::path::Path;
 ///  -container-port 5432`
 ///
 /// We do not depend on every flag being present; we extract what we can and
-/// leave the rest blank.
+/// leave the rest blank. Only `-container-ip` is consumed today — the socket's
+/// host port is what the UI displays, so `-container-port` is not needed.
 #[derive(Debug, Clone, Default)]
 pub struct DockerProxyInfo {
     pub container_ip: Option<String>,
-    pub container_port: Option<u16>,
 }
 
 impl DockerProxyInfo {
@@ -45,22 +45,10 @@ impl DockerProxyInfo {
                     .or_else(|| args.get(i + 1).copied())
                     .unwrap_or("unknown");
                 info.container_ip = Some(value.to_string());
-            } else if rest == "container-port"
-                || rest.starts_with("container-port=")
-                || rest.starts_with("container-port ")
-            {
-                let raw = rest
-                    .strip_prefix("container-port=")
-                    .or_else(|| rest.strip_prefix("container-port ").map(|s| s.trim()))
-                    .or_else(|| args.get(i + 1).copied())
-                    .unwrap_or("0");
-                if let Ok(port) = raw.parse::<u16>() {
-                    info.container_port = Some(port);
-                }
             }
         }
 
-        if info.container_ip.is_none() && info.container_port.is_none() {
+        if info.container_ip.is_none() {
             None
         } else {
             Some(info)

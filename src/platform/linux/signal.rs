@@ -7,7 +7,6 @@ impl Signal {
         match self {
             Signal::Term => libc::SIGTERM,
             Signal::Kill => libc::SIGKILL,
-            Signal::Interrupt => libc::SIGINT,
         }
     }
 }

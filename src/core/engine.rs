@@ -31,11 +31,14 @@ pub struct Engine {
 
 impl Engine {
     /// Create a new engine with the given proc root.
-    pub fn new(proc_root: Option<&Path>, config: Config) -> Result<Self> {
+    ///
+    /// Infallible: the probe construction and uid resolution never fail on the
+    /// Linux backend, so callers get an `Engine` straight away.
+    pub fn new(proc_root: Option<&Path>, config: Config) -> Self {
         let platform = Box::new(LinuxProbe::new(proc_root));
         let current_uid = platform.current_uid();
 
-        Ok(Self {
+        Self {
             platform,
             cache: CacheStore::new(),
             registry: DetectorRegistry::new(),
@@ -43,7 +46,7 @@ impl Engine {
             current_uid,
             num_cpus: crate::platform::linux::metrics::get_num_cpus(),
             container_warning: None,
-        })
+        }
     }
 
     /// Signal the process behind a service, refusing if the PID was recycled.
@@ -62,19 +65,24 @@ impl Engine {
     /// This is the only safe way to turn a port into a kill target: the
     /// snapshot the UI holds can be seconds old, and the process behind a port
     /// may have exited and been replaced in that window.
-    pub fn service_on_port(&mut self, port: u16) -> Result<Option<Service>> {
-        let snapshot = self.scan()?;
-        Ok(snapshot.by_port(port).cloned())
+    pub fn service_on_port(&mut self, port: u16) -> Option<Service> {
+        let snapshot = self.scan();
+        snapshot.by_port(port).cloned()
     }
 
     /// Perform a full scan and return a snapshot.
-    pub fn scan(&mut self) -> Result<SharedSnapshot> {
+    ///
+    /// Infallible by design: every failure mode (unreadable `/proc/net`,
+    /// vanishing processes, permission errors) degrades into the snapshot's
+    /// `degradations` instead of erroring, so the UI always has a frame to
+    /// draw. `Degradation::ScanFailed` is the "the scan itself failed" signal.
+    pub fn scan(&mut self) -> SharedSnapshot {
         let start = Instant::now();
         let mut degradations = Vec::new();
 
         let sockets = match self.platform.list_listening_sockets() {
             Ok(s) => s,
-            Err(e) => return Ok(Arc::new(self.empty_snapshot(start, e))),
+            Err(e) => return Arc::new(self.empty_snapshot(start, e)),
         };
 
         let sockets: Vec<Socket> = sockets
@@ -167,7 +175,7 @@ impl Engine {
                 _ => (None, None),
             };
 
-            services.push(Service {
+            let mut service = Service {
                 id: ServiceId::from_socket(&socket),
                 socket,
                 process,
@@ -175,9 +183,9 @@ impl Engine {
                 framework,
                 container,
                 docker_proxy_rewritten: false,
-            });
-
-            rewrite_docker_proxy(services.last_mut().unwrap());
+            };
+            rewrite_docker_proxy(&mut service);
+            services.push(service);
         }
 
         if let Some(deg) = self.container_warning_cached() {
@@ -196,19 +204,17 @@ impl Engine {
         let mut services = merge_dual_stack(services);
         services.sort_by_key(|s| s.socket.port);
 
-        Ok(Arc::new(Snapshot {
+        Arc::new(Snapshot {
             services,
-            taken_at: start,
             taken_at_epoch_secs: epoch_secs(),
             scan_duration_ms: start.elapsed().as_millis() as u64,
             degradations,
-        }))
+        })
     }
 
     fn empty_snapshot(&self, start: Instant, error: anyhow::Error) -> Snapshot {
         Snapshot {
             services: Vec::new(),
-            taken_at: start,
             taken_at_epoch_secs: epoch_secs(),
             scan_duration_ms: start.elapsed().as_millis() as u64,
             degradations: vec![Degradation::ScanFailed(format!("{error:#}"))],
