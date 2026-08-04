@@ -93,13 +93,28 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
         }
     }
 
-    // Podman v2 (systemd): libpod-<64hex>.scope, both the rootful
-    // `system.slice/` and `machine.slice/` spellings.
-    if let Some(rest) = path
-        .strip_prefix("system.slice/libpod-")
-        .or_else(|| path.strip_prefix("machine.slice/libpod-"))
-    {
-        if let Some(id) = rest.strip_suffix(".scope").filter(|id| is_hex_id(id)) {
+    // cgroup v2 scope forms. Matching the leaf scope name covers every
+    // hierarchy the runtime drivers use: `system.slice/` (rootful systemd),
+    // `machine.slice/` (podman rootful v2), `user.slice/user-<uid>.slice/…`
+    // (rootless docker and podman), and `kubepods.slice/…` (Kubernetes).
+    if let Some(leaf) = path.rsplit('/').next() {
+        if let Some(id) = leaf
+            .strip_prefix("docker-")
+            .and_then(|r| r.strip_suffix(".scope"))
+            .filter(|id| is_hex_id(id))
+        {
+            return Some(Container {
+                runtime: Runtime::Docker,
+                id: id.to_string(),
+                name: None,
+                compose_project: None,
+            });
+        }
+        if let Some(id) = leaf
+            .strip_prefix("libpod-")
+            .and_then(|r| r.strip_suffix(".scope"))
+            .filter(|id| is_hex_id(id))
+        {
             return Some(Container {
                 runtime: Runtime::Podman,
                 id: id.to_string(),
@@ -107,17 +122,34 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
                 compose_project: None,
             });
         }
-    }
-
-    // containerd/k8s: cri-containerd-<64hex>.scope
-    if let Some(rest) = path.strip_prefix("system.slice/cri-containerd-") {
-        if let Some(id) = rest.strip_suffix(".scope").filter(|id| is_hex_id(id)) {
+        if let Some(id) = leaf
+            .strip_prefix("cri-containerd-")
+            .and_then(|r| r.strip_suffix(".scope"))
+            .filter(|id| is_hex_id(id))
+        {
             return Some(Container {
                 runtime: Runtime::Containerd,
                 id: id.to_string(),
                 name: None,
                 compose_project: None,
             });
+        }
+        // systemd-nspawn: machine-<name>.scope under machine.slice. Machine
+        // names are arbitrary (no hex guard), but restricted to the
+        // machine.slice hierarchy to avoid false positives elsewhere.
+        if path.starts_with("machine.slice/") {
+            if let Some(id) = leaf
+                .strip_prefix("machine-")
+                .and_then(|r| r.strip_suffix(".scope"))
+                .filter(|id| !id.is_empty())
+            {
+                return Some(Container {
+                    runtime: Runtime::SystemdNspawn,
+                    id: id.to_string(),
+                    name: None,
+                    compose_project: None,
+                });
+            }
         }
     }
 
@@ -216,5 +248,24 @@ mod tests {
     fn test_docker_proxy_scope_is_not_a_container() {
         let line = "0::/system.slice/docker-proxy-abc123.scope";
         assert!(parse_cgroup_line(line).is_none());
+    }
+
+    /// Rootless podman (and docker) live deep under user.slice; leaf matching
+    /// must still find the libpod scope.
+    #[test]
+    fn test_rootless_podman_v2() {
+        let line = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/libpod-abc123.scope";
+        let container = parse_cgroup_line(line).unwrap();
+        assert_eq!(container.runtime, Runtime::Podman);
+    }
+
+    /// systemd-nspawn machines live in machine.slice as machine-<name>.scope;
+    /// names are arbitrary, so the branch must not demand a hex id.
+    #[test]
+    fn test_systemd_nspawn_machine_scope() {
+        let line = "0::/machine.slice/machine-web1.scope";
+        let container = parse_cgroup_line(line).unwrap();
+        assert_eq!(container.runtime, Runtime::SystemdNspawn);
+        assert_eq!(container.id, "web1");
     }
 }

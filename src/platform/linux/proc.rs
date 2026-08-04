@@ -36,10 +36,11 @@ pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
         }
     });
     let status = read_status(&pid_dir).unwrap_or_default();
-    let user = match status.uid {
-        Some(uid) => uid_to_username(uid),
-        None => None,
-    };
+    // Username resolution is deliberately left to the engine: it is an NSS
+    // call (`getpwuid_r`) and goes through the L4 cache so LDAP/SSSD boxes do
+    // not pay one lookup per process per scan. The uid rides along on the
+    // Process for the engine to resolve.
+    let user = None;
 
     Ok(Process {
         pid,
@@ -48,6 +49,7 @@ pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
         cmdline,
         exe,
         cwd,
+        uid: status.uid,
         user,
         started_at: stat.started_at,
         starttime_jiffies: stat.starttime_jiffies,
@@ -265,10 +267,14 @@ struct StatInfo {
 
 /// Resolve a numeric UID to a username via the POSIX `getpwuid_r` API.
 ///
+/// `pub(crate)`: the engine calls this through the L4 cache
+/// (`CacheStore::get_user`/`insert_user`); platform exposes the primitive,
+/// core decides how often it runs.
+///
 /// The buffer is sized at 4 KiB, which covers every username in active use
 /// (Linux caps user names at 32 bytes; even NIS/LDAP entries fit comfortably).
 /// A too-small buffer returns None and the caller degrades gracefully.
-fn uid_to_username(uid: u32) -> Option<String> {
+pub(crate) fn uid_to_username(uid: u32) -> Option<String> {
     let buf_size = 4096;
     let mut buf = vec![0u8; buf_size];
     let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();

@@ -141,7 +141,9 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
 
         // Check for Cargo.toml with [workspace]
         if current.join("Cargo.toml").exists() {
-            if let Ok(content) = std::fs::read_to_string(current.join("Cargo.toml")) {
+            if let Some(content) =
+                crate::detect::project::read_manifest(&current.join("Cargo.toml"))
+            {
                 if content.contains("[workspace]") {
                     workspace_root = Some(current.clone());
                     break;
@@ -231,10 +233,25 @@ pub fn manifest_mtime(root: &Path) -> Option<u64> {
         .and_then(|p| crate::cache::keys::mtime(&p))
 }
 
+/// Read a manifest file with a hard cap and a regular-file requirement
+/// (PRD §13.2: 1 MiB).
+///
+/// A `cwd` that points at a FIFO or device node must not block the scan
+/// forever on `open()`, and an oversized manifest must not be slurped whole.
+/// A missing file is `None`, as is anything that is not a regular file.
+pub(crate) fn read_manifest(path: &Path) -> Option<String> {
+    const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_MANIFEST_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// Try to read the package name from a manifest file.
 fn read_package_name(root: &Path) -> Option<String> {
     // package.json
-    if let Ok(content) = std::fs::read_to_string(root.join("package.json")) {
+    if let Some(content) = read_manifest(&root.join("package.json")) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(name) = json.get("name").and_then(|n| n.as_str()) {
                 return Some(name.to_string());
@@ -244,7 +261,7 @@ fn read_package_name(root: &Path) -> Option<String> {
 
     // Cargo.toml: only the name under [package]. A bare `name =` scan picks up
     // the first dependency entry in a workspace manifest.
-    if let Ok(content) = std::fs::read_to_string(root.join("Cargo.toml")) {
+    if let Some(content) = read_manifest(&root.join("Cargo.toml")) {
         let mut in_package = false;
         for line in content.lines() {
             let line = line.trim();
@@ -263,7 +280,7 @@ fn read_package_name(root: &Path) -> Option<String> {
     }
 
     // go.mod: the last path component of the module path.
-    if let Ok(content) = std::fs::read_to_string(root.join("go.mod")) {
+    if let Some(content) = read_manifest(&root.join("go.mod")) {
         for line in content.lines() {
             if let Some(module) = line.strip_prefix("module ") {
                 if let Some(name) = module.trim().rsplit('/').next() {
@@ -412,5 +429,25 @@ mod tests {
         let dir = project(&[("Cargo.toml", "[package]\n")]);
         let project = detect_project(dir.path()).unwrap();
         assert!(project.technical_name.is_none());
+    }
+
+    /// A manifest over the 1 MiB cap is not slurped: it yields no name, no
+    /// dependencies, nothing — and the scan does not hang on it.
+    #[test]
+    fn test_read_manifest_rejects_oversized_files() {
+        let dir = project(&[]);
+        let big = dir.path().join("package.json");
+        std::fs::write(&big, " ".repeat(1024 * 1024 + 1)).unwrap();
+        assert!(read_manifest(&big).is_none());
+    }
+
+    /// A directory (or FIFO/device) planted where a manifest should be must
+    /// not block the scan: `read_manifest` requires a regular file.
+    #[test]
+    fn test_read_manifest_ignores_non_regular_files() {
+        let dir = project(&[]);
+        let d = dir.path().join("package.json");
+        std::fs::create_dir(&d).unwrap();
+        assert!(read_manifest(&d).is_none());
     }
 }

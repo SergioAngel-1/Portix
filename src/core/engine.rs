@@ -1,6 +1,5 @@
 use crate::cache::store::CpuSample;
 use crate::cache::CacheStore;
-use crate::core::container_warning::detect_container_warning;
 use crate::core::docker_proxy::rewrite_docker_proxy;
 use crate::core::Config;
 use crate::detect::project::{detect_project, manifest_mtime};
@@ -24,6 +23,10 @@ pub struct Engine {
     config: Config,
     current_uid: u32,
     num_cpus: usize,
+    /// Last container-warning result, recomputed at most once per 10 s: the
+    /// heuristic walks all of `/proc` (cgroup + cmdline of every pid) and is
+    /// far too expensive to run on every refresh.
+    container_warning: Option<(Instant, Option<Degradation>)>,
 }
 
 impl Engine {
@@ -39,6 +42,7 @@ impl Engine {
             config,
             current_uid,
             num_cpus: crate::platform::linux::metrics::get_num_cpus(),
+            container_warning: None,
         })
     }
 
@@ -176,7 +180,7 @@ impl Engine {
             rewrite_docker_proxy(services.last_mut().unwrap());
         }
 
-        if let Some(deg) = detect_container_warning(self.platform.proc_root()) {
+        if let Some(deg) = self.container_warning_cached() {
             degradations.push(deg);
         }
 
@@ -224,6 +228,24 @@ impl Engine {
         true
     }
 
+    /// The container warning, recomputed at most once per 10 s.
+    ///
+    /// `platform::container_warning` walks all of `/proc` (one cgroup and one
+    /// cmdline read per pid); running that on every refresh would blow the
+    /// hot-refresh budget. Ten seconds is plenty of granularity for a
+    /// status-bar hint.
+    fn container_warning_cached(&mut self) -> Option<Degradation> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(10);
+        if let Some((at, deg)) = &self.container_warning {
+            if at.elapsed() < TTL {
+                return deg.clone();
+            }
+        }
+        let deg = self.platform.container_warning();
+        self.container_warning = Some((Instant::now(), deg.clone()));
+        deg
+    }
+
     /// Read a process fresh from `/proc`, then attach its CPU delta from the
     /// previous sample. Metadata is not cached: `cmdline`/`exe`/`cwd` change on
     /// `exec`/`chdir` while `(pid, starttime)` stays the same, so a cached copy
@@ -239,6 +261,22 @@ impl Engine {
         let mut process = self.platform.process_metadata(pid).ok()?;
         let key = process.key();
         live.insert(key);
+
+        // L4: uid -> username, cached (300 s TTL). `getpwuid_r` is an NSS
+        // call; on LDAP/SSSD boxes a per-process-per-scan lookup is real
+        // latency, so resolve through the cache and only miss once per uid.
+        if let Some(uid) = process.uid {
+            process.user = match self.cache.get_user(uid) {
+                Some(name) => Some(name.clone()),
+                None => {
+                    let name = crate::platform::linux::proc::uid_to_username(uid);
+                    if let Some(ref n) = name {
+                        self.cache.insert_user(uid, n.clone());
+                    }
+                    name
+                }
+            };
+        }
 
         if let Some(started) = process.started_at {
             process.metrics.uptime = started.elapsed().ok();
@@ -359,38 +397,48 @@ fn epoch_secs() -> u64 {
 ///
 /// A server that binds `0.0.0.0` and `::` (or a `::` socket with `IPV6_V6ONLY=0`)
 /// appears twice in `/proc/net/*`. Showing both makes `next dev` look like two
-/// services and makes the tool look broken. Identity is (pid, port, family).
+/// services and makes the tool look broken. The pair is (pid, port, family)
+/// with one IPv4 and one IPv6 member; the IPv6 socket survives.
+///
+/// Two sockets of the *same* IP version on one port and pid (SO_REUSEPORT
+/// workers, or explicit binds like 127.0.0.1 + 0.0.0.0) are genuinely distinct
+/// listeners and are never merged.
 fn merge_dual_stack(services: Vec<Service>) -> Vec<Service> {
-    let mut by_identity: HashMap<(Option<i32>, u16, Family), usize> = HashMap::new();
+    // One slot per IP version per identity: the first v4 parks here to be
+    // paired with a later v6; a parked v6 is paired with a later v4. Same-
+    // version duplicates get their own rows.
+    let mut v4_slot: HashMap<(i32, u16, Family), usize> = HashMap::new();
+    let mut v6_slot: HashMap<(i32, u16, Family), usize> = HashMap::new();
     let mut out: Vec<Service> = Vec::with_capacity(services.len());
 
     for service in services {
-        let pid = service.process.as_ref().map(|p| p.pid);
-        let identity = (pid, service.socket.port, service.socket.protocol.family());
-
         // Sockets we could not attribute to a process are never merged: two
         // unknown listeners on the same port may be genuinely different things.
-        if pid.is_none() {
+        let Some(pid) = service.process.as_ref().map(|p| p.pid) else {
             out.push(service);
             continue;
-        }
+        };
+        let key = (pid, service.socket.port, service.socket.protocol.family());
 
-        match by_identity.get(&identity) {
-            Some(&existing) => {
-                let kept: &mut Service = &mut out[existing];
-                if kept.socket.protocol.is_v6() != service.socket.protocol.is_v6() {
-                    kept.socket.dual_stack = true;
-                }
-                // Prefer the IPv6 socket as the survivor: it is the one a modern
-                // runtime actually binds, and the one whose scope is widest.
-                if service.socket.protocol.is_v6() && !kept.socket.protocol.is_v6() {
-                    let dual = kept.socket.dual_stack;
-                    *kept = service;
-                    kept.socket.dual_stack = dual;
-                }
+        if service.socket.protocol.is_v6() {
+            // Park next to an unattached v4 row: the pair becomes one
+            // dual-stack row with the v6 as survivor.
+            if let Some(&idx) = v4_slot.get(&key) {
+                let kept = &mut out[idx];
+                *kept = service;
+                kept.socket.dual_stack = true;
+                v4_slot.remove(&key);
+            } else {
+                v6_slot.entry(key).or_insert(out.len());
+                out.push(service);
             }
-            None => {
-                by_identity.insert(identity, out.len());
+        } else {
+            // v4: attach to a parked v6 row if one is waiting.
+            if let Some(&idx) = v6_slot.get(&key) {
+                out[idx].socket.dual_stack = true;
+                v6_slot.remove(&key);
+            } else {
+                v4_slot.entry(key).or_insert(out.len());
                 out.push(service);
             }
         }
@@ -433,6 +481,7 @@ mod tests {
                 cmdline: vec!["node".into()],
                 exe: None,
                 cwd: None,
+                uid: None,
                 user: None,
                 started_at: None,
                 starttime_jiffies: 1,
@@ -484,6 +533,18 @@ mod tests {
         let merged = merge_dual_stack(vec![
             service(Protocol::Tcp, 53, None),
             service(Protocol::Tcp, 53, None),
+        ]);
+        assert_eq!(merged.len(), 2);
+    }
+
+    /// Two sockets of the same IP version on one port and pid are distinct
+    /// listeners (SO_REUSEPORT, or 127.0.0.1 + 0.0.0.0 in one process). The
+    /// merge exists for v4+v6 dual-stack pairs only.
+    #[test]
+    fn test_same_version_sockets_on_one_port_are_not_merged() {
+        let merged = merge_dual_stack(vec![
+            service(Protocol::Tcp, 3000, Some(1)),
+            service(Protocol::Tcp, 3000, Some(1)),
         ]);
         assert_eq!(merged.len(), 2);
     }

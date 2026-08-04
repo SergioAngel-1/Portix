@@ -89,7 +89,7 @@ impl Framework {
         let version = self
             .version
             .as_ref()
-            .map(|v| format!(" {}", v))
+            .map(|v| format!(" {v}"))
             .unwrap_or_default();
         format!(
             "{} {}{}{}",
@@ -99,16 +99,4 @@ impl Framework {
             self.confidence.suffix()
         )
     }
-}
-
-/// Relationship between frameworks.
-#[derive(Debug, Clone)]
-pub enum FrameworkRelation {
-    /// If both score high, show only the supersedes one
-    Supersedes {
-        supersedes: String,
-        superseded: String,
-    },
-    /// Show the implies one as suffix
-    Implies { primary: String, secondary: String },
 }

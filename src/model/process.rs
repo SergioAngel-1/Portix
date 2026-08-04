@@ -83,6 +83,10 @@ pub struct Process {
     pub exe: Option<PathBuf>,
     #[serde(serialize_with = "path_as_str")]
     pub cwd: Option<PathBuf>,
+    /// Numeric uid owning the process. `user` is its (cached) name; the engine
+    /// resolves names through the L4 cache so LDAP/SSSD boxes do not pay one
+    /// `getpwuid_r` per process per scan.
+    pub uid: Option<u32>,
     pub user: Option<String>,
     #[serde(skip)]
     pub started_at: Option<SystemTime>,
@@ -170,6 +174,7 @@ mod tests {
             cmdline: cmdline.iter().map(|s| s.to_string()).collect(),
             exe: None,
             cwd: None,
+            uid: None,
             user: None,
             started_at: None,
             starttime_jiffies: 1,

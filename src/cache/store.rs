@@ -230,4 +230,16 @@ mod tests {
             )
             .is_none());
     }
+
+    /// L4 (uid → username): a hit returns the cached name; a miss that was
+    /// stored becomes a hit. This is the cache the engine routes every
+    /// `getpwuid_r` through.
+    #[test]
+    fn test_user_cache_roundtrip() {
+        let mut cache = CacheStore::new();
+        assert!(cache.get_user(1000).is_none());
+
+        cache.insert_user(1000, "sergi".to_string());
+        assert_eq!(cache.get_user(1000).map(String::as_str), Some("sergi"));
+    }
 }

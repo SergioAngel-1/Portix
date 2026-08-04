@@ -25,6 +25,12 @@ pub trait PlatformProbe {
     /// Check if a process is running inside a container.
     fn container_of(&self, pid: i32) -> Option<Container>;
 
+    /// System-level container-runtime heuristic for the hidden-ports warning:
+    /// `Some(Degradation::ContainerPortsHidden)` when a runtime is active but
+    /// no `docker-proxy` sibling is visible (so published ports may be hidden
+    /// from `/proc/net`). The caller decides how often to recompute it.
+    fn container_warning(&self) -> Option<crate::model::Degradation>;
+
     /// Send a signal to a process, aborting if `expected_starttime` no longer
     /// matches the live process (PID reuse).
     fn signal(&self, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()>;
@@ -69,6 +75,10 @@ impl PlatformProbe for LinuxProbe {
 
     fn container_of(&self, pid: i32) -> Option<Container> {
         linux::cgroup::container_of(&self.proc_root, pid)
+    }
+
+    fn container_warning(&self) -> Option<crate::model::Degradation> {
+        linux::container_warning::detect_container_warning(&self.proc_root)
     }
 
     fn signal(&self, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()> {

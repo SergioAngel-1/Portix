@@ -2,7 +2,6 @@
 
 pub mod actions;
 pub mod config;
-pub mod container_warning;
 pub mod docker_proxy;
 pub mod engine;
 pub mod query;

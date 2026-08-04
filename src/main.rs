@@ -264,8 +264,10 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
 }
 
 fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i32> {
-    let snapshot = scan_with_cpu(engine)?;
-    let Some(service) = snapshot.by_port(port) else {
+    // Fresh scan up front: both the confirmation text and the signal must
+    // describe the process that owns the port *now*, not a seconds-old
+    // snapshot. (CPU columns are irrelevant here, so a single scan suffices.)
+    let Some(service) = engine.service_on_port(port)? else {
         eprintln!("No service listening on port {port}");
         return Ok(exit::NO_MATCH);
     };
@@ -292,8 +294,8 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
     }
 
     let signal = if force { Signal::Kill } else { Signal::Term };
-    // The snapshot can be seconds old. Re-resolve from a fresh scan so the
-    // signal targets the process currently on this port, not a ghost.
+    // The user may have taken seconds to answer; re-resolve from a fresh scan
+    // so the signal targets the process currently on this port, not a ghost.
     let service = match engine.service_on_port(port)? {
         Some(s) => s,
         None => {
@@ -397,6 +399,17 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             }
         }
 
+        Effect::KillRequest(port, signal) => {
+            // Re-resolve from a fresh scan before showing the confirmation:
+            // the snapshot the UI holds can be seconds old, and the modal must
+            // describe the process that owns the port *now*.
+            match engine.service_on_port(port) {
+                Ok(Some(service)) => app.arm_kill(service, signal),
+                Ok(None) => app.error = Some(format!("no service listening on port {port}")),
+                Err(e) => app.error = Some(e.to_string()),
+            }
+        }
+
         Effect::Kill(port, signal) => {
             // The snapshot the UI holds can be seconds old: a process may have
             // exited and another bound the same port in that window. Re-resolve
@@ -486,7 +499,9 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
         portix_lib::ui::views::confirm_modal::render(
             f,
             f.area(),
-            app.selected_service(),
+            // The freshly re-resolved service (Effect::KillRequest), never the
+            // possibly-stale selection.
+            app.pending_kill_service(),
             signal,
             &app.theme,
         );

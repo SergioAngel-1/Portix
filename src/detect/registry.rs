@@ -21,6 +21,10 @@ const NODE_DEPENDENCIES: &[(&str, &str)] = &[
     ("remix", "@remix-run/node"),
     ("nestjs", "@nestjs/core"),
     ("express", "express"),
+    // React is what makes the `Supersedes { nextjs → react }` relation real:
+    // a plain React SPA has no other framework signal, and a Next.js project
+    // carries both deps — where the supersede kicks in on the tie.
+    ("react", "react"),
 ];
 const PROJECT_FILES: &[(&str, &[&str])] = &[
     (
@@ -53,7 +57,7 @@ fn conventional_port(port: u16) -> Option<&'static str> {
 /// Resolve the version of a detected framework from manifest dependencies.
 fn resolve_version(root: Option<&Path>, framework_id: &str) -> Option<String> {
     let root = root?;
-    let content = std::fs::read_to_string(root.join("package.json")).ok()?;
+    let content = crate::detect::project::read_manifest(&root.join("package.json"))?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
 
     let dep_key = NODE_DEPENDENCIES
@@ -94,19 +98,19 @@ fn is_asgi_app_target(arg: &str) -> bool {
 }
 
 /// Does `root/app.py` exist and construct a Flask app (`Flask(`)?
+///
+/// Bounded by `read_manifest` (1 MiB cap, regular-file requirement): a
+/// project file could be arbitrarily large, or a FIFO planted where a file
+/// should be.
 fn flask_app_py(root: &Path) -> bool {
-    let app_py = root.join("app.py");
-    match std::fs::metadata(&app_py) {
-        Ok(meta) if meta.len() <= 256 * 1024 => std::fs::read_to_string(&app_py)
-            .map(|c| c.contains("Flask("))
-            .unwrap_or(false),
-        _ => false,
-    }
+    crate::detect::project::read_manifest(&root.join("app.py"))
+        .map(|c| c.contains("Flask("))
+        .unwrap_or(false)
 }
 
 /// Read the merged dependency map from a package.json, if there is one.
 fn read_dependencies(root: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let content = std::fs::read_to_string(root.join("package.json")).ok()?;
+    let content = crate::detect::project::read_manifest(&root.join("package.json"))?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
 
     let mut merged = serde_json::Map::new();
@@ -203,10 +207,18 @@ impl DetectorRegistry {
 
         let confidence = crate::detect::scoring::score_to_confidence(best_score);
         let version = resolve_version(cwd, display_id);
+        let name = framework_display_name(display_id);
+        // Implies relations (fastapi → uvicorn, gunicorn → wsgi) render as a
+        // suffix: the implied framework is a true fact about the stack, so it
+        // shows whenever the primary is detected.
+        let display_name = match self.implied_suffix(display_id) {
+            Some(suffix) => format!("{name} · {suffix}"),
+            None => name,
+        };
 
         Some(Framework {
             id: display_id.to_string(),
-            display_name: framework_display_name(display_id),
+            display_name,
             version,
             language: framework_language(display_id),
             confidence,
@@ -214,6 +226,18 @@ impl DetectorRegistry {
                 .iter()
                 .map(|s| s.evidence.clone())
                 .collect(),
+        })
+    }
+
+    /// If the resolved framework implies another (`fastapi` → `uvicorn`,
+    /// `gunicorn` → `wsgi`), return the implied framework's display name so
+    /// the caller can render it as a suffix.
+    fn implied_suffix(&self, id: &str) -> Option<String> {
+        self.relations.iter().find_map(|relation| match relation {
+            Relation::Implies { primary, secondary } if primary == id => {
+                Some(framework_display_name(secondary))
+            }
+            _ => None,
         })
     }
 
@@ -379,11 +403,13 @@ fn framework_display_name(id: &str) -> String {
         "remix" => "Remix".to_string(),
         "nestjs" => "NestJS".to_string(),
         "express" => "Express".to_string(),
+        "react" => "React".to_string(),
         "fastapi" => "FastAPI".to_string(),
         "django" => "Django".to_string(),
         "flask" => "Flask".to_string(),
         "uvicorn" => "Uvicorn".to_string(),
         "gunicorn" => "Gunicorn".to_string(),
+        "wsgi" => "WSGI".to_string(),
         "go" => "Go".to_string(),
         "rust" => "Rust".to_string(),
         "node" => "Node".to_string(),
@@ -394,10 +420,11 @@ fn framework_display_name(id: &str) -> String {
 
 fn framework_language(id: &str) -> Language {
     match id {
-        "nextjs" | "vite" | "astro" | "nuxt" | "remix" | "nestjs" | "express" | "node" => {
-            Language::Node
+        "nextjs" | "vite" | "astro" | "nuxt" | "remix" | "nestjs" | "express" | "react"
+        | "node" => Language::Node,
+        "fastapi" | "django" | "flask" | "uvicorn" | "gunicorn" | "wsgi" | "python" => {
+            Language::Python
         }
-        "fastapi" | "django" | "flask" | "uvicorn" | "gunicorn" | "python" => Language::Python,
         "go" => Language::Go,
         "rust" => Language::Rust,
         _ => Language::Unknown,
@@ -596,5 +623,35 @@ mod tests {
             .unwrap();
         assert_eq!(fw.id, "flask");
         assert!(fw.version.is_none());
+    }
+
+    /// React is a real, detectable framework: a plain React SPA with no other
+    /// framework dependency must show "React", not fall back to the Node
+    /// runtime. This is also what makes `Supersedes { nextjs → react }` live.
+    #[test]
+    fn test_react_spa_is_detected_as_react() {
+        let dir = project(&[("package.json", r#"{"dependencies":{"react":"^19.0.0"}}"#)]);
+        let fw = detect(dir.path(), &["node", "server.js"], 3000).unwrap();
+        assert_eq!(fw.id, "react");
+        assert_eq!(fw.display_name, "React");
+        assert_eq!(fw.version.as_deref(), Some("19.0.0"));
+    }
+
+    /// FastAPI implies Uvicorn: the resolved framework's display carries the
+    /// implied framework as a suffix ("FastAPI · Uvicorn").
+    #[test]
+    fn test_fastapi_implies_uvicorn_suffix() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline: Vec<String> = ["python", "-m", "uvicorn", "app:app"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 8000)
+            .unwrap();
+        assert_eq!(fw.id, "fastapi");
+        assert!(fw.display_name.contains("Uvicorn"));
+        assert!(fw.display_name.starts_with("FastAPI"));
     }
 }

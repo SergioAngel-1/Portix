@@ -37,6 +37,10 @@ pub struct App {
     pub theme_cursor: usize,
     /// Theme (name + palette) to restore if the picker is cancelled.
     theme_saved: Option<(String, Theme)>,
+    /// Freshly re-resolved service awaiting kill confirmation, armed by
+    /// `main.rs::run_effect` when `Effect::KillRequest` is processed. `None`
+    /// outside `Mode::ConfirmKill`.
+    pending_kill: Option<(Service, Signal)>,
     /// Set when an effect failed, shown in the status bar until the next action.
     pub error: Option<String>,
 }
@@ -65,6 +69,7 @@ impl App {
             theme_name,
             theme_cursor: 0,
             theme_saved: None,
+            pending_kill: None,
             error: None,
         }
     }
@@ -158,10 +163,16 @@ impl App {
                 }
             }
 
-            Mode::ConfirmKill(signal) => match key.code {
-                KeyCode::Esc | KeyCode::Char('n') => self.mode = Mode::Normal,
+            Mode::ConfirmKill(_) => match key.code {
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.pending_kill = None;
+                    self.mode = Mode::Normal;
+                }
                 KeyCode::Enter | KeyCode::Char('y') => {
-                    if let Some(service) = self.selected_service() {
+                    // The service shown in the modal is the freshly re-resolved
+                    // one; carry its port so the actual signal is re-verified
+                    // against the live process once more in run_effect.
+                    if let Some((service, signal)) = self.pending_kill.take() {
                         effects.push(Effect::Kill(service.socket.port, signal));
                     }
                     self.mode = Mode::Normal;
@@ -226,10 +237,27 @@ impl App {
             return;
         };
         if self.config.kill_confirm {
-            self.mode = Mode::ConfirmKill(signal);
+            // Defer to main.rs: the snapshot this selection came from can be
+            // seconds old. The confirm modal must describe the process that
+            // owns the port *now*, so run_effect re-resolves from a fresh scan
+            // and arms the modal with the current owner (Effect::KillRequest).
+            effects.push(Effect::KillRequest(service.socket.port, signal));
         } else {
             effects.push(Effect::Kill(service.socket.port, signal));
         }
+    }
+
+    /// Enter the kill-confirmation mode with a freshly re-resolved service, so
+    /// the modal shows the process that owns the port now — not a ghost from a
+    /// stale snapshot. Called by `main.rs::run_effect` (Effect::KillRequest).
+    pub fn arm_kill(&mut self, service: Service, signal: Signal) {
+        self.pending_kill = Some((service, signal));
+        self.mode = Mode::ConfirmKill(signal);
+    }
+
+    /// The freshly re-resolved service awaiting confirmation, for the modal.
+    pub fn pending_kill_service(&self) -> Option<&Service> {
+        self.pending_kill.as_ref().map(|(s, _)| s)
     }
 
     fn set_query(&mut self, query: &str) {
@@ -279,6 +307,11 @@ impl App {
 pub enum Effect {
     Quit,
     OpenBrowser(String),
+    /// Ask main.rs to re-resolve the service on `port` from a fresh scan and
+    /// arm the kill-confirmation modal with it. Only emitted when
+    /// `config.kill_confirm` is on; the modal must not describe a stale
+    /// snapshot while the signal targets a different process.
+    KillRequest(u16, Signal),
     /// Kill the service currently listening on `port`.
     Kill(u16, Signal),
     CopyToClipboard(String),
@@ -319,6 +352,7 @@ mod tests {
                         cmdline: vec!["node".into()],
                         exe: None,
                         cwd: None,
+                        uid: None,
                         user: None,
                         started_at: None,
                         starttime_jiffies: 7,
@@ -365,11 +399,22 @@ mod tests {
     #[test]
     fn test_x_requests_confirmation_then_sends_sigterm() {
         let mut app = app_with_services(1);
-        assert!(app.handle_key(key('x')).is_empty());
+        // 'x' defers to main.rs: re-resolve and arm the modal.
+        let effects = app.handle_key(key('x'));
+        assert!(matches!(
+            effects[0],
+            Effect::KillRequest(3000, Signal::Term)
+        ));
+        assert_eq!(app.mode, Mode::Normal);
+
+        // main.rs arms the modal with the freshly re-resolved service.
+        let service = app.selected_service().unwrap().clone();
+        app.arm_kill(service, Signal::Term);
         assert_eq!(app.mode, Mode::ConfirmKill(Signal::Term));
+        assert!(app.pending_kill_service().is_some());
 
         let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(effects[0], Effect::Kill(_, Signal::Term)));
+        assert!(matches!(effects[0], Effect::Kill(3000, Signal::Term)));
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -377,20 +422,34 @@ mod tests {
     #[test]
     fn test_capital_x_confirms_to_sigkill() {
         let mut app = app_with_services(1);
-        app.handle_key(key('X'));
+        let effects = app.handle_key(key('X'));
+        assert!(matches!(
+            effects[0],
+            Effect::KillRequest(3000, Signal::Kill)
+        ));
+
+        let service = app.selected_service().unwrap().clone();
+        app.arm_kill(service, Signal::Kill);
         assert_eq!(app.mode, Mode::ConfirmKill(Signal::Kill));
 
         let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(effects[0], Effect::Kill(_, Signal::Kill)));
+        assert!(matches!(effects[0], Effect::Kill(3000, Signal::Kill)));
     }
 
     #[test]
     fn test_kill_confirmation_can_be_cancelled() {
         let mut app = app_with_services(1);
         app.handle_key(key('x'));
+        let service = app.selected_service().unwrap().clone();
+        app.arm_kill(service, Signal::Term);
+
         let effects = app.handle_key(KeyEvent::from(KeyCode::Esc));
         assert!(effects.is_empty());
         assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.pending_kill_service().is_none(),
+            "cancel clears the arming"
+        );
     }
 
     #[test]

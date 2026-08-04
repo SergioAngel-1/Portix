@@ -120,6 +120,7 @@ mod tests {
                 cmdline: cmdline.iter().map(|s| s.to_string()).collect(),
                 exe: None,
                 cwd: None,
+                uid: None,
                 user: None,
                 started_at: None,
                 starttime_jiffies: 1,

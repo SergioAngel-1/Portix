@@ -1,3 +1,9 @@
+//! System-level container runtime detection for the hidden-ports warning.
+//!
+//! Lives in `platform/` — the only layer allowed to read `/proc` — so `core/`
+//! can ask "is a runtime active without a userland proxy?" through the
+//! `PlatformProbe` trait instead of doing OS I/O itself.
+
 use crate::model::{Degradation, Runtime};
 use std::path::Path;
 
@@ -7,14 +13,14 @@ use std::path::Path;
 /// This is intentionally lightweight and best-effort:
 /// - inspect `/proc/<pid>/cgroup` for docker/podman/containerd scopes, using
 ///   the same structured parser as per-socket attribution
-///   (`platform/linux/cgroup.rs`), never substring matching
+///   (`super::cgroup`), never substring matching
 /// - check for common proxy binaries via `cmdline`
 /// - when runtime processes are found but **no** `docker-proxy` sibling is
 ///   visible, emit a `Degradation::ContainerPortsHidden`
 ///
 /// The inverse case matters too: when `docker-proxy` IS running, the
 /// userland-proxy is enabled and published ports DO appear in `/proc/net` —
-/// nothing is hidden, so no warning (the earlier implementation warned in both
+/// nothing is hidden, so no warning (an earlier implementation warned in both
 /// cases, which put a permanent ⚠ on any box that merely ran Docker).
 ///
 /// We do not read `/proc/<pid>/environ` or call out to any daemon.
@@ -41,9 +47,9 @@ pub fn detect_container_warning(proc_root: &Path) -> Option<Degradation> {
 ///
 /// This is a static snapshot at scan time. It only needs to be right often
 /// enough to show a useful status-bar hint; a false negative is acceptable.
-/// Runtime attribution goes through `parse_cgroup_line`, so the daemon's own
-/// unit (`docker.service`) and host-level `docker-proxy-…` scopes are not
-/// mistaken for containers.
+/// Runtime attribution goes through `cgroup::parse_cgroup_line`, so the
+/// daemon's own unit (`docker.service`) and host-level `docker-proxy-…` scopes
+/// are not mistaken for containers.
 fn active_runtimes(proc_root: &Path) -> Vec<&'static str> {
     let mut seen = Vec::new();
 
@@ -60,8 +66,7 @@ fn active_runtimes(proc_root: &Path) -> Vec<&'static str> {
             };
 
             for line in data.lines() {
-                let Some(container) = crate::platform::linux::cgroup::parse_cgroup_line(line)
-                else {
+                let Some(container) = super::cgroup::parse_cgroup_line(line) else {
                     continue;
                 };
                 let name = match container.runtime {
