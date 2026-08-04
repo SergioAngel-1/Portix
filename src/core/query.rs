@@ -72,40 +72,30 @@ impl Query {
 
     /// Convert a service to a searchable string.
     fn service_to_string(&self, service: &Service) -> String {
-        let mut parts = Vec::new();
+        use std::fmt::Write;
+        let mut buf = String::new();
+        write!(buf, "{}", service.socket.port).unwrap();
 
-        // Port
-        parts.push(service.socket.port.to_string());
-
-        // Project name
         if let Some(ref project) = service.project {
-            parts.push(project.display_name().to_string());
+            write!(buf, " {}", project.display_name()).unwrap();
         }
-
-        // Framework
         if let Some(ref framework) = service.framework {
-            parts.push(framework.display_name.clone());
+            write!(buf, " {}", framework.display_name).unwrap();
         }
-
-        // Command
         if let Some(ref process) = service.process {
-            parts.push(process.command_display());
+            write!(buf, " {}", process.command_display()).unwrap();
         }
-
-        // PID
         if let Some(ref process) = service.process {
-            parts.push(process.pid.to_string());
+            write!(buf, " {}", process.pid).unwrap();
         }
-
-        // Container
         if let Some(ref container) = service.container {
-            parts.push(container.id.clone());
+            write!(buf, " {}", container.id).unwrap();
             if let Some(ref name) = container.name {
-                parts.push(name.clone());
+                write!(buf, " {}", name).unwrap();
             }
         }
 
-        parts.join(" ")
+        buf
     }
 }
 

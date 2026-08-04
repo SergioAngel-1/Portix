@@ -22,8 +22,6 @@ const NODE_DEPENDENCIES: &[(&str, &str)] = &[
     ("nestjs", "@nestjs/core"),
     ("express", "express"),
 ];
-
-/// (framework id, files whose presence implies it)
 const PROJECT_FILES: &[(&str, &[&str])] = &[
     (
         "nextjs",
@@ -52,24 +50,13 @@ fn conventional_port(port: u16) -> Option<&'static str> {
     }
 }
 
-/// Map framework_id → the dep key used in package.json for version lookup.
-const NODE_DEP_KEY: &[(&str, &str)] = &[
-    ("nextjs", "next"),
-    ("vite", "vite"),
-    ("astro", "astro"),
-    ("nuxt", "nuxt"),
-    ("remix", "@remix-run/node"),
-    ("nestjs", "@nestjs/core"),
-    ("express", "express"),
-];
-
 /// Resolve the version of a detected framework from manifest dependencies.
 fn resolve_version(root: Option<&Path>, framework_id: &str) -> Option<String> {
     let root = root?;
     let content = std::fs::read_to_string(root.join("package.json")).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    let dep_key = NODE_DEP_KEY
+    let dep_key = NODE_DEPENDENCIES
         .iter()
         .find(|(id, _)| *id == framework_id)
         .map(|(_, key)| *key)?;

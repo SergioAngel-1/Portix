@@ -121,6 +121,10 @@ impl Config {
                 if let Ok(config) = toml::from_str(&content) {
                     return config;
                 }
+                eprintln!(
+                    "portix: config.toml exists but is invalid TOML; using defaults. Fix or remove {}",
+                    config_file.display()
+                );
             }
         }
 
@@ -148,7 +152,7 @@ impl Config {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let existing = std::fs::read_to_string(&path)?;
         std::fs::write(&path, upsert_theme_line(&existing, &self.theme))
     }
 }

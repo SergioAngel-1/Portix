@@ -32,11 +32,13 @@ pub fn build_inode_map(
                             if let Some(inode_str) = inode_str.strip_suffix(']') {
                                 if let Ok(inode) = inode_str.parse::<u64>() {
                                     if interest_inodes.contains(&inode) {
-                                        let fd_num = entry
+                                        let Some(fd_num) = entry
                                             .file_name()
                                             .to_str()
                                             .and_then(|s| s.parse::<i32>().ok())
-                                            .unwrap_or(0);
+                                        else {
+                                            continue;
+                                        };
                                         map.entry(inode).or_default().push((pid, fd_num));
                                     }
                                 }

@@ -19,15 +19,15 @@ pub fn detect_container_warning(proc_root: &Path) -> Option<Degradation> {
         return None;
     }
 
-    let msg = if runtimes[0] == "docker" && !has_docker_proxy {
+    let msg = if runtimes.len() == 1 && runtimes[0] == "docker" && !has_docker_proxy {
         format!(
             "{} active without docker-proxy; published ports may be hidden.",
-            runtimes[0]
+            runtimes.join(", ")
         )
     } else {
         format!(
             "{} active; userland-proxy may be disabled for some published ports.",
-            runtimes[0]
+            runtimes.join(", ")
         )
     };
 
