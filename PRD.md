@@ -410,18 +410,18 @@ Cada dependencia es una carga de mantenimiento y una superficie de supply chain.
 |---|---|---|---|
 | `ratatui` | Framework TUI | Sí | — |
 | `crossterm` | Backend de terminal | Sí | `termion` |
-| `procfs` | Parseo tipado de `/proc` | **No** — evaluar | Parseo propio (ver nota) |
-| `rustix` | Syscalls seguras (`kill`, `sysconf`) sin `libc` | Sí | `nix`, `libc` |
-| `crossbeam-channel` | Canales multiproductor con `select` | Recomendado | `std::sync::mpsc` |
-| `rayon` | Pool de paralelismo de datos para el enriquecimiento | Sí | `std::thread::scope` |
+| `libc` | Syscalls puntuales (`getuid`, `sysconf`, `kill`, `getpwuid_r`) | Sí | `nix` (más pesado) |
 | `serde` + `serde_json` | Leer `package.json`, `composer.json`; salida `--json` | Sí | — |
 | `toml` | Config del usuario y detectores declarativos | Sí | — |
 | `nucleo-matcher` | Fuzzy matching (motor de Helix) | Sí | `fuzzy-matcher` |
 | `clap` (derive) | CLI | Sí | `lexopt` (más ligero) |
-| `anyhow` + `thiserror` | Errores | Sí | — |
+| `clap_complete` | Completions de shell (`--completions`) | Sí | Manual |
+| `anyhow` | Errores | Sí | — |
 | `directories` | Rutas XDG | Sí | `$XDG_*` a mano |
-| `arboard` | Portapapeles (Wayland + X11) | Solo v1 | `wl-copy`/`xclip` externos |
+| `arboard` | Portapapeles (Wayland + X11) | Solo v1 | `wl-copy`/`xclip` externos (usado hoy) |
 | `notify` | inotify para invalidar caché | v1.5 | Polling de `mtime` |
+
+**Estado real del `Cargo.toml` (MVP):** `procfs` fue **rechazado** (ver nota abajo) y la capa `linux/` se escribió a mano; `rustix` nunca se añadió — los cuatro syscalls necesarios van por `libc`; `crossbeam-channel` y `rayon` **se retiraron** porque el enriquecimiento aún es síncrono dentro de `scan()` (se reintroducirán con el Tier 3 asíncrono de §10.3); `thiserror` se eliminó por falta de uso (los errores son `anyhow`); `arboard` sigue comentado en favor de `wl-copy`/`xclip` vía `Command` (`core/actions.rs`).
 
 **Nota sobre `procfs`:** el crate es cómodo pero asigna agresivamente (`String` por campo) y expone estructuras pesadas que no necesitamos. En el camino caliente (leer `stat` de 500 procesos a 1 Hz) queremos parsear a `&[u8]` con buffers reutilizados y cero asignaciones. **Recomendación: escribir la capa `linux/` a mano** (es ~600 líneas, totalmente testeable con fixtures) y usar `procfs` únicamente como referencia de formatos y en tests como oráculo cruzado. Esto también elimina una dependencia del camino crítico y nos da control total sobre el manejo de errores parciales.
 
@@ -872,7 +872,7 @@ started_at = btime + starttime / HZ
 
 | Fase | Enfoque | Alcance |
 |---|---|---|
-| **MVP** | Escanear `/proc/net/*` del host. Detectar `docker-proxy` por `cmdline` y **reescribir la fila** para atribuirla al contenedor destino (el `cmdline` de `docker-proxy` contiene `-container-ip` y `-container-port`). Detectar `nftables`/`iptables` DNAT no; en su lugar, mostrar un aviso en la barra de estado si se detecta un daemon de contenedores activo cuyos puertos podrían no ser visibles. **Nunca fingir que no hay nada.** |
+| **MVP** | Escanear `/proc/net/*` del host. Detectar `docker-proxy` por `cmdline` y **reescribir la fila** para atribuirla al contenedor destino (el `cmdline` de `docker-proxy` contiene `-container-ip` y `-container-port`). Detectar `nftables`/`iptables` DNAT no; en su lugar, emitir la degradación `ContainerPortsHidden` **solo cuando hay un runtime activo y no hay ningún `docker-proxy` visible** (proxy de userland habilitado ⇒ los puertos publicados sí aparecen en `/proc/net` ⇒ no hay nada oculto). La atribución de runtime usa el parser estructurado de `platform/linux/cgroup.rs` (nunca subcadenas), de modo que un host que solo ejecuta `dockerd` (su unidad `docker.service`) no dispara el aviso. **Nunca fingir que no hay nada.** |
 | **v1** | Enumerar netns únicos vía `/proc/<pid>/ns/net` (comparando el inode del symlink). Para cada netns distinto del nuestro, leer `/proc/<pid_representante>/net/tcp` — **este fichero sí existe y contiene la tabla del netns de ese proceso, y es legible sin `setns()`**. Unir con el mapa global de inodes. Esto resuelve el 95% de los casos de Docker sin privilegios especiales (siempre que el proceso del contenedor sea del mismo usuario o tengamos root). |
 | **v1.5** | Consultar la API de Docker para nombres, imágenes y mapeo de puertos declarado. |
 | **v2** | `setns()` sobre netns ajenos (requiere `CAP_SYS_ADMIN`); leer reglas de `nftables` para resolver DNAT. Solo si la evidencia de usuarios lo justifica. |
@@ -1214,6 +1214,8 @@ Refrescarlo todo cada segundo es un desperdicio de dos órdenes de magnitud. La 
 - **L3 depende de `mtime(manifest)`.** Tras `pnpm add next@16`, `package.json` cambia de `mtime`, la entrada se invalida y la versión mostrada se actualiza en el siguiente refresco. Sin polling, sin inotify, sin coste.
 - **Negative caching.** Si `cwd` es `/` o no hay proyecto, se cachea el `None` con TTL de 30 s. Sin esto, cada refresco reintenta el ascenso de directorios completo para `nginx`, `sshd` y `systemd-resolved`. Es un tercio del coste del escaneo.
 
+**Estado de implementación (MVP):** L1 no cachea metadata de proceso — decisión deliberada, documentada en `core/engine.rs::resolve_process`: `cmdline`/`exe`/`cwd` cambian con `exec`/`chdir` mientras `(pid, starttime)` permanece estable, así que una copia cacheada se congelaría con valores obsoletos; lo que sí se cachea con clave `(pid, starttime)` son las **muestras de CPU** (`CacheStore::cpu_samples`). L2 y L3 están implementados tal como se describen (L3 añade un `disc` = hash de `(port, exe, cmdline)` a la clave, para que dos procesos que comparten raíz pero corren comandos distintos no colisionen). **L4 (uid→username) está definida pero sin cablear** — `process_metadata` llama a `getpwuid_r` directamente por proceso y por scan; conectar L4 es una tarea P1 (importante con NSS LDAP/SSSD). L5 (contenedor) no está implementada; por ahora la membresía se memoiza por PID dentro de un mismo scan (`seen_container` en `engine.rs`).
+
 ### 10.3 Estrategia de refresco por niveles
 
 ```
@@ -1233,6 +1235,8 @@ t=+15ms  ┌─ Tier 3: proyecto + framework      ┐  asíncrono, en rayon pool
 ```
 
 **Consecuencia de UX:** un servicio recién detectado aparece **inmediatamente** en la tabla con puerto, PID y comando, y su columna de proyecto muestra un spinner sutil durante ~5 ms antes de rellenarse. **Nunca se retrasa el frame esperando al enriquecimiento.** Esta es la diferencia entre «se siente instantáneo» y «se siente pesado».
+
+> **Estado MVP:** el Tier 3 asíncrono **no está implementado**. `Engine::scan()` resuelve sockets + métricas + metadata + proyecto + framework de forma **síncrona y secuencial** en el mismo recorrido, así que el primer frame paga el coste de enriquecimiento completo antes de dibujarse. El diseño de este apartado (rayon pool + `Event::Enriched`) es la referencia para v1; de momento el presupuesto se sostiene gracias a las cachés L2/L3 y a la memoización por scan (`seen`/`seen_context` en `engine.rs`). La pausa `FocusLost` × 4 también está pendiente.
 
 **Adaptación:**
 
@@ -1591,6 +1595,8 @@ El layout por restricciones de `ratatui` hace esto declarativo, sin aritmética 
 | `[keys]` | — | Remapeo de atajos (v1) |
 | `[detectors]` | — | Habilitar/deshabilitar detectores por id |
 
+**Estado MVP de las claves:** `ascii`, `default_sort`, `memory_metric`, `browser`, `editor` y `docker_socket` están declaradas en `core/config.rs` con sus defaults pero **aún no tienen efecto** — `open_url` (`core/actions.rs`) usa `xdg-open` fijo (no `browser`), el portapapeles va por `wl-copy`/`xclip` (no `arboard`), y `docker_socket` espera a la fase v1.5 de la API de Docker. Se implementan en v1; hasta entonces son inofensivas pero no deben usarse como si funcionaran.
+
 ### 12.2 CLI y modo no interactivo
 
 Portix es una TUI, pero **un buen ciudadano de Unix** (JS-1 desde un script, y P2/Marcos):
@@ -1598,21 +1604,23 @@ Portix es una TUI, pero **un buen ciudadano de Unix** (JS-1 desde un script, y P
 | Invocación | Comportamiento |
 |---|---|
 | `portix` | TUI interactiva |
-| `portix :3000` / `portix --port 3000` | Imprime el servicio del puerto 3000 y sale. **Este es el comando que reemplaza a `lsof -i :3000`.** |
+| `portix :3000` | Imprime el servicio del puerto 3000 y sale. **Este es el comando que reemplaza a `lsof -i :3000`.** (En MVP solo el posicional acepta `3000` o `:3000`; el alias `--port` queda para v1.) |
 | `portix --json` | Snapshot completo en JSON a stdout, exit 0. Sin TUI. Esquema versionado. |
 | `portix --json :3000` | JSON de un solo servicio |
 | `portix --once` | Un frame de la tabla en texto plano, sin entrar en modo raw |
 | `portix --kill :3000` | Mata lo que ocupe el 3000, con confirmación (`--yes` para saltarla) |
-| `portix --watch` | TUI, pero sale cuando el puerto observado se libera |
+| `portix --watch` | **v1 — no implementado en MVP** (TUI que sale cuando el puerto observado se libera) |
 | `portix --proc-root <path>` | Raíz de `/proc` alternativa (tests, contenedores) |
 | `portix --interval 500` | |
 | `portix --no-color` / `NO_COLOR=1` | |
 | `portix completions <shell>` | bash/zsh/fish/nu |
 | `portix --version` / `--help` | |
 
-**Códigos de salida:** `0` éxito · `1` error general · `2` uso incorrecto · `3` ningún servicio coincide (útil en scripts: `portix :3000 || pnpm dev`) · `4` permisos insuficientes para la operación pedida.
+**Códigos de salida:** `0` éxito · `1` error general · `2` uso incorrecto · `3` ningún servicio coincide (útil en scripts: `portix :3000 || pnpm dev`) · `4` permisos insuficientes para la operación pedida. **Estado MVP:** el `2` lo produce `clap` al parsear; el `4` (permisos) no está implementado — la degradación por permisos se comunica vía `Degradation::SocketsWithoutPid` y los códigos `0`/`1`/`3` son los únicos que los scripts deben esperar hoy.
 
 **Contrato del JSON:** campo `schema_version` en la raíz. Los campos desconocidos por el consumidor deben ignorarse. Añadir campos es minor; quitar o cambiar tipo es major. `--json` **nunca** escribe nada en stdout que no sea JSON válido (los avisos van a stderr).
+
+**Nota sobre `--once`/`--json`/`--kill` (MVP):** para mostrar CPU con sentido se ejecutan **dos escaneos separados por un sleep fijo de 200 ms** (`scan_with_cpu` en `main.rs`) — el primer scan solo siembra la muestra de jiffies. El sleep no sigue `refresh_ms`; si el coste importa, revisar antes de v1.
 
 ---
 
@@ -1631,11 +1639,11 @@ Esto se declara en el README y se verifica en CI con un test que ejecuta Portix 
 | Vector | Análisis | Mitigación |
 |---|---|---|
 | **Parseo de `/proc`** | Los datos vienen de procesos de otros usuarios; `cmdline` y `comm` son **entrada controlada por el atacante**. Un `comm` de `x) 0 0 0 …` rompe parsers ingenuos (§7.4). | `#![forbid(unsafe_code)]` fuera de `platform/`. Fuzzing del parser (§16.4). Parseo de `stat` por el último `)`. |
-| **Inyección de secuencias de escape en la terminal** | Un proceso malicioso con `argv[0] = "\x1b]0;pwned\x07"` puede **secuestrar el título de la terminal, mover el cursor o inyectar texto en el buffer de entrada** cuando Portix lo imprime en la columna «Comando». Esto es una vulnerabilidad real y documentada en herramientas de terminal. | **Todo texto procedente del sistema se sanea antes de dibujarse**: se eliminan los caracteres de control C0/C1 (excepto tab, que se expande) y se sustituyen por `·`. Esto se implementa en `ui/format.rs` como un único punto de paso obligatorio, y hay un test que fuzzea con secuencias ANSI. **Sin excepciones.** |
+| **Inyección de secuencias de escape en la terminal** | Un proceso malicioso con `argv[0] = "\x1b]0;pwned\x07"` puede **secuestrar el título de la terminal, mover el cursor o inyectar texto en el buffer de entrada** cuando Portix lo imprime en la columna «Comando». Esto es una vulnerabilidad real y documentada en herramientas de terminal. | **Todo texto procedente del sistema se sanea antes de dibujarse**: se eliminan los caracteres de control C0/C1 (excepto tab, que se expande) y se sustituyen por `·`. Esto se implementa en `ui/format.rs` como un único punto de paso obligatorio, y hay tests de regresión con secuencias ANSI en `ui/format.rs` y en cada vista que renderiza texto derivado del sistema (incluida la versión de framework del panel de detalle, que era un bypass). **Sin excepciones.** El fuzzing real del parser (§16.4) sigue pendiente. |
 | **`environ` con secretos** | `/proc/<pid>/environ` contiene `DATABASE_URL`, tokens, claves. | **No se lee en el MVP.** En v1, la señal `env_var` de los detectores solo comprueba **la existencia de una clave**, jamás lee ni almacena valores. El panel de detalle **nunca** muestra `environ`. Si en el futuro se muestra, será tras un flag explícito y con enmascaramiento de valores por defecto. |
 | **`kill` sobre PID equivocado** | PID reciclado entre el snapshot y la pulsación de la tecla → se mata un proceso inocente. | Antes de enviar la señal se **re-verifica `(pid, starttime)`** contra `/proc/<pid>/stat`. Si no coincide, se aborta con un error visible. Este es un chequeo TOCTOU obligatorio y barato. |
 | **Ejecución de comandos externos** (`xdg-open`, `$EDITOR`, `docker logs`) | Inyección de comandos si se construye una línea de shell. | **Nunca se usa `sh -c`.** Siempre `Command::new(prog).arg(x)` con argumentos separados. Las URLs se construyen desde tipos, no desde cadenas del proceso. |
-| **Symlinks hostiles en el ascenso de directorios** | Un `cwd` que apunta a `/etc` hace que Portix intente leer manifiestos ahí. | El ascenso se limita a `$HOME` y a 24 niveles; solo se abren ficheros con nombres de una lista blanca (`package.json`, etc.); se limita el tamaño de lectura a 1 MiB; `O_NOFOLLOW` en el fichero final. |
+| **Symlinks hostiles en el ascenso de directorios** | Un `cwd` que apunta a `/etc` hace que Portix intente leer manifiestos ahí. | El ascenso se limita a `$HOME` y a 24 niveles; solo se abren ficheros con nombres de una lista blanca (`package.json`, etc.); se limita el tamaño de lectura a 1 MiB; `O_NOFOLLOW` en el fichero final. **Estado MVP:** el límite de 1 MiB solo está implementado para `app.py` (256 KiB en `detect/registry.rs`); las lecturas de `package.json`/`Cargo.toml`/`go.mod` aún no tienen tope (P1). |
 | **Supply chain** | Ver §5.4. | `cargo-deny`, `cargo-audit`, `Cargo.lock` comiteado, sin `build.rs` con red. |
 
 ### 13.3 Privilegios: la decisión de no escalarlos

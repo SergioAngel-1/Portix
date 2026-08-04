@@ -1,4 +1,5 @@
 use crate::model::Snapshot;
+use crate::ui::format::cell;
 use crate::ui::theme::Theme;
 use ratatui::{
     layout::Rect,
@@ -36,10 +37,11 @@ pub fn render(
 ) {
     // An effect failure — notably the TOCTOU guard refusing to signal a recycled
     // PID — takes over the whole bar until the next keypress clears it. It must
-    // not be swallowed by hints or stats.
+    // not be swallowed by hints or stats. The text is system-derived (errors
+    // can embed paths), so it passes through the `cell` chokepoint.
     if let Some(err) = error {
         let line = Line::from(Span::styled(
-            format!("⚠ {err}"),
+            format!("⚠ {}", cell(err)),
             Style::default()
                 .fg(theme.danger)
                 .add_modifier(Modifier::BOLD),

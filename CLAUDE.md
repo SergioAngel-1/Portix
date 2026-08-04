@@ -32,7 +32,7 @@ Tests live in `#[cfg(test)] mod tests` blocks inside the module they test (`plat
 The layering is the load-bearing decision. Dependencies flow one way and never invert:
 
 ```
-ui ──▶ core ──▶ { detect, cache, platform } ──▶ model ──▶ util
+ui ──▶ core ──▶ { detect, cache, platform } ──▶ model
 ```
 
 - `model/` — pure domain types, `std` + `serde` only. **No I/O.** `Service` is the central entity: the union of a socket, its process, its project, and its framework.
@@ -60,8 +60,8 @@ The MVU state and its overlays all live behind `App`:
 ### Container awareness
 
 - **Per-socket attribution** (`core/engine.rs` + `platform/linux/cgroup.rs`) — container membership is resolved per PID from `/proc/<pid>/cgroup` and cached per process during a scan.
-- **Docker proxy rewrite** (`core/docker_proxy.rs`) — when the owning process is `docker-proxy`, the service row is rewritten into the destination container using parsed `-container-ip` / `-container-port` flags. The original host process/cmdline are preserved so the UI still shows what really runs on the host.
-- **Container warning** (`core/container_warning.rs`) — if active runtimes are detected but no `docker-proxy` sibling is found, a `Degradation::ContainerPortsHidden` is emitted so the user knows some published ports may not appear.
+- **Docker proxy rewrite** (`core/docker_proxy.rs`) — when the owning process is `docker-proxy`, the service row is rewritten into the destination container using parsed `-container-ip` / `-container-port` flags. The original host process/cmdline are preserved so the UI still shows what really runs on the host. Known limitation: the synthesized `Container.id` holds the container **IP** (from `-container-ip`), not a short ID, and `name`/`compose_project` stay `None` — the Docker API is only consulted in the v1.5 phase.
+- **Container warning** (`core/container_warning.rs`) — if active runtimes are detected but no `docker-proxy` sibling is found, a `Degradation::ContainerPortsHidden` is emitted so the user knows some published ports may not appear. The inverse is deliberate: with `docker-proxy` running, the userland-proxy is enabled, ports **are** visible, and no warning is shown. Runtime detection reuses `platform/linux/cgroup.rs::parse_cgroup_line` (structured parsing, never substrings), so a host that merely runs `dockerd` (its own `docker.service` unit) does not trip the warning.
 
 ## Non-negotiable constraints
 
@@ -80,4 +80,4 @@ These come from PRD §7, §13 and exist because each has bitten a real tool:
 
 ## Performance budget
 
-First frame < 50 ms, hot refresh < 15 ms, RSS < 15 MB. Redraw on events, never in an idle loop — CPU at rest between snapshots must be indistinguishable from zero. Enrichment (project + framework) is meant to run off the critical path so a new service appears instantly with port/PID/command and fills in its project a few ms later; never block a frame on it.
+First frame < 50 ms, hot refresh < 15 ms, RSS < 15 MB. Redraw on events, never in an idle loop — CPU at rest between snapshots must be indistinguishable from zero. Note on the current state: enrichment (project + framework) runs **synchronously inside `Engine::scan()`** today, so a scan pays detection cost before the frame is drawn; the off-critical-path design of PRD §10.3 (rayon pool + `Event::Enriched`) is not yet implemented. The container warning heuristic (`core/container_warning.rs`) also walks all of `/proc` twice per scan (cgroup + cmdline); moving it into `platform/` and reusing data already read during the scan is a known performance item (P1).

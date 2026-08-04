@@ -62,7 +62,7 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
                 cell(&fw.display_name),
                 Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(" {}", fw.version.as_deref().unwrap_or(""))),
+            Span::raw(version_span(fw.version.as_deref())),
             Span::styled(
                 format!("  ({})", fw.confidence.display()),
                 Style::default().fg(theme.muted),
@@ -192,6 +192,16 @@ fn memory_line(p: &crate::model::Process) -> String {
     }
 }
 
+/// The version string of a framework, as a padded display span, sanitized.
+///
+/// `fw.version` is read from `package.json` dependencies — attacker-controlled
+/// text. A malicious version like `"\x1b]0;pwned\x07"` must not reach the
+/// terminal raw (PRD §13.2), so it passes through the `format::cell`
+/// chokepoint like every other system-derived string.
+fn version_span(version: Option<&str>) -> String {
+    format!(" {} ", cell(version.unwrap_or("")))
+}
+
 /// The real listen address, bracketing IPv6 the standard way (`[::]:7777`)
 /// rather than the ambiguous `:::7777`. Fixes the old hardcoded `[::]:{port}`
 /// that ignored the actual address.
@@ -232,4 +242,25 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A version string straight out of a malicious package.json must not
+    /// reach the terminal raw. This is the exact bypass the chokepoint rule
+    /// exists to prevent (PRD §13.2).
+    #[test]
+    fn test_version_span_sanitizes_attacker_controlled_versions() {
+        let span = version_span(Some("\x1b]0;pwned\x07"));
+        assert!(!span.contains('\x1b'));
+        assert!(!span.contains('\x07'));
+        assert!(!span.contains('\n'));
+    }
+
+    #[test]
+    fn test_version_span_absent_version_is_just_padding() {
+        assert_eq!(version_span(None), "  ");
+    }
 }

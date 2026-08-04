@@ -5,20 +5,29 @@ use std::path::Path;
 pub fn container_of(proc_root: &Path, pid: i32) -> Option<Container> {
     let cgroup_path = proc_root.join(pid.to_string()).join("cgroup");
     let content = std::fs::read_to_string(&cgroup_path).ok()?;
+    content.lines().find_map(parse_cgroup_line)
+}
 
-    for line in content.lines() {
-        // Try v2 format: "0::/system.slice/docker-..."
-        if let Some(rest) = line.strip_prefix("0::") {
-            if let Some(container) = parse_cgroup_path(rest) {
-                return Some(container);
-            }
+/// Parse a single line of `/proc/<pid>/cgroup` into a container, if any.
+///
+/// Handles both forms:
+/// - v2: `0::/system.slice/docker-<id>.scope`
+/// - v1: `1:cpu,cpuacct:/docker/<id>`
+///
+/// `pub(crate)` so the container warning heuristic (`core/container_warning.rs`)
+/// reuses the exact same structured parsing instead of substring matching.
+pub(crate) fn parse_cgroup_line(line: &str) -> Option<Container> {
+    // Try v2 format: "0::/system.slice/docker-..."
+    if let Some(rest) = line.strip_prefix("0::") {
+        if let Some(container) = parse_cgroup_path(rest) {
+            return Some(container);
         }
+    }
 
-        // Try v1 format: "hierarchy:subsystem-list:cgroup-path"
-        if let Some(rest) = line.splitn(3, ':').nth(2) {
-            if let Some(container) = parse_cgroup_path(rest) {
-                return Some(container);
-            }
+    // Try v1 format: "hierarchy:subsystem-list:cgroup-path"
+    if let Some(rest) = line.splitn(3, ':').nth(2) {
+        if let Some(container) = parse_cgroup_path(rest) {
+            return Some(container);
         }
     }
 
@@ -26,10 +35,16 @@ pub fn container_of(proc_root: &Path, pid: i32) -> Option<Container> {
 }
 
 /// Parse a cgroup path to extract container info.
+///
+/// Real paths carry a leading slash on both v1 (`/docker/<id>`) and v2
+/// (`/system.slice/docker-<id>.scope`) lines — verified against live kernels.
+/// Normalize once so every branch below matches either spelling.
 fn parse_cgroup_path(path: &str) -> Option<Container> {
+    let path = path.strip_prefix('/').unwrap_or(path);
+
     // Docker v2 (systemd): docker-<64hex>.scope
     if let Some(rest) = path.strip_prefix("system.slice/docker-") {
-        if let Some(id) = rest.strip_suffix(".scope") {
+        if let Some(id) = rest.strip_suffix(".scope").filter(|id| is_hex_id(id)) {
             return Some(Container {
                 runtime: Runtime::Docker,
                 id: id.to_string(),
@@ -40,9 +55,9 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
     }
 
     // Docker v1: /docker/<64hex>
-    if let Some(rest) = path.strip_prefix("/docker/") {
+    if let Some(rest) = path.strip_prefix("docker/") {
         let id = rest.trim_end_matches('/');
-        if !id.is_empty() {
+        if is_hex_id(id) {
             return Some(Container {
                 runtime: Runtime::Docker,
                 id: id.to_string(),
@@ -53,9 +68,9 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
     }
 
     // Podman v1: /libpod/<64hex>
-    if let Some(rest) = path.strip_prefix("/libpod/") {
+    if let Some(rest) = path.strip_prefix("libpod/") {
         let id = rest.trim_end_matches('/');
-        if !id.is_empty() {
+        if is_hex_id(id) {
             return Some(Container {
                 runtime: Runtime::Podman,
                 id: id.to_string(),
@@ -66,9 +81,9 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
     }
 
     // containerd v1: /cri-containerd/<64hex>
-    if let Some(rest) = path.strip_prefix("/cri-containerd/") {
+    if let Some(rest) = path.strip_prefix("cri-containerd/") {
         let id = rest.trim_end_matches('/');
-        if !id.is_empty() {
+        if is_hex_id(id) {
             return Some(Container {
                 runtime: Runtime::Containerd,
                 id: id.to_string(),
@@ -78,9 +93,13 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
         }
     }
 
-    // Podman: libpod-<64hex>.scope
-    if let Some(rest) = path.strip_prefix("system.slice/libpod-") {
-        if let Some(id) = rest.strip_suffix(".scope") {
+    // Podman v2 (systemd): libpod-<64hex>.scope, both the rootful
+    // `system.slice/` and `machine.slice/` spellings.
+    if let Some(rest) = path
+        .strip_prefix("system.slice/libpod-")
+        .or_else(|| path.strip_prefix("machine.slice/libpod-"))
+    {
+        if let Some(id) = rest.strip_suffix(".scope").filter(|id| is_hex_id(id)) {
             return Some(Container {
                 runtime: Runtime::Podman,
                 id: id.to_string(),
@@ -92,7 +111,7 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
 
     // containerd/k8s: cri-containerd-<64hex>.scope
     if let Some(rest) = path.strip_prefix("system.slice/cri-containerd-") {
-        if let Some(id) = rest.strip_suffix(".scope") {
+        if let Some(id) = rest.strip_suffix(".scope").filter(|id| is_hex_id(id)) {
             return Some(Container {
                 runtime: Runtime::Containerd,
                 id: id.to_string(),
@@ -103,6 +122,14 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
     }
 
     None
+}
+
+/// Container IDs are 64 hex chars (abbreviated in tests). Requiring hex
+/// rejects host-level lookalikes such as `system.slice/docker.service` (the
+/// daemon's own unit) or a hypothetical `docker-proxy-…` scope, which must
+/// not be attributed to a container.
+fn is_hex_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -160,5 +187,34 @@ mod tests {
         let path = "system.slice/libpod-abc123.scope";
         let container = parse_cgroup_path(path).unwrap();
         assert_eq!(container.runtime, Runtime::Podman);
+    }
+
+    /// Real v2 lines carry a leading slash ("0::/system.slice/..."), unlike the
+    /// bare-path unit tests above. This is the shape a live kernel produces.
+    #[test]
+    fn test_parse_v2_full_line_with_leading_slash() {
+        let line = "0::/system.slice/docker-3f2a9c1b8e7d6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a.scope";
+        let container = parse_cgroup_line(line).unwrap();
+        assert_eq!(container.runtime, Runtime::Docker);
+
+        let line = "0::/machine.slice/libpod-abc123.scope";
+        let container = parse_cgroup_line(line).unwrap();
+        assert_eq!(container.runtime, Runtime::Podman);
+    }
+
+    /// The daemon's own systemd unit is not a container. A substring match on
+    /// "docker" would fire here and warn on every box that merely runs dockerd.
+    #[test]
+    fn test_daemon_unit_is_not_a_container() {
+        let line = "0::/system.slice/docker.service";
+        assert!(parse_cgroup_line(line).is_none());
+    }
+
+    /// docker-proxy runs on the host; its scope must not be attributed to a
+    /// container either (the id after `docker-` is not hex).
+    #[test]
+    fn test_docker_proxy_scope_is_not_a_container() {
+        let line = "0::/system.slice/docker-proxy-abc123.scope";
+        assert!(parse_cgroup_line(line).is_none());
     }
 }

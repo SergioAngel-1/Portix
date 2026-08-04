@@ -3,11 +3,11 @@
 //! Dependencies flow one way and never invert:
 //!
 //! ```text
-//! ui ──▶ core ──▶ { detect, cache, platform } ──▶ model ──▶ util
+//! ui ──▶ core ──▶ { detect, cache, platform } ──▶ model
 //! ```
 //!
 //! `unsafe` is denied crate-wide, and hard-`forbid`den in every layer outside
-//! `platform` (`core`, `detect`, `ui`, `model`, `cache`, `util` each set
+//! `platform` (`core`, `detect`, `ui`, `model`, `cache` each set
 //! `#![forbid(unsafe_code)]` at their root). The only places that opt back in
 //! are the syscall wrappers in `platform::linux`, each with a SAFETY comment:
 //! parsing attacker-controlled `/proc` data must never happen next to raw

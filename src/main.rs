@@ -109,7 +109,9 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            eprintln!("portix: {e:#}");
+            // The error can embed system-derived paths; sanitize before it
+            // reaches the terminal (PRD §13.2).
+            eprintln!("portix: {}", cell(&format!("{e:#}")));
             std::process::exit(exit::ERROR);
         }
     }
@@ -255,7 +257,7 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
     }
 
     for degradation in &snapshot.degradations {
-        eprintln!("warning: {}", degradation.message());
+        eprintln!("warning: {}", cell(&degradation.message()));
     }
 
     Ok(exit::OK)

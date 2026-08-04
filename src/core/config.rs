@@ -147,12 +147,26 @@ impl Config {
     /// Persist the current theme back to `config.toml`, surgically: only the
     /// `theme` line is rewritten, so hand-written comments and other settings
     /// survive. The file (and its directory) are created if absent.
+    ///
+    /// An unreadable-but-existing file is an error and propagates to the
+    /// caller: silently overwriting it with a one-line file would destroy the
+    /// user's other settings. A *missing* file is not an error — it is the
+    /// first save.
     pub fn save_theme(&self) -> std::io::Result<()> {
-        let path = Self::config_path();
+        self.save_theme_to(Self::config_path())
+    }
+
+    /// Same as [`save_theme`], but writes to an explicit path. Split out so
+    /// tests can exercise the write without touching the real XDG config.
+    fn save_theme_to(&self, path: PathBuf) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let existing = std::fs::read_to_string(&path)?;
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
         std::fs::write(&path, upsert_theme_line(&existing, &self.theme))
     }
 }
@@ -209,5 +223,37 @@ mod tests {
     #[test]
     fn test_upsert_into_empty_file() {
         assert_eq!(upsert_theme_line("", "auto"), "theme = \"auto\"\n");
+    }
+
+    /// The first theme save on a machine with no config.toml must create the
+    /// file. The previous implementation treated a missing file as a read
+    /// error and the save silently failed ("could not save theme").
+    #[test]
+    fn test_save_theme_creates_file_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = Config {
+            theme: "mono".to_string(),
+            ..Config::default()
+        };
+
+        config.save_theme_to(path.clone()).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "theme = \"mono\"\n");
+    }
+
+    /// An existing-but-unreadable file must propagate the error, never be
+    /// silently replaced by a one-line file.
+    #[test]
+    fn test_save_theme_propagates_unreadable_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory is not a readable file: read_to_string fails with
+        // IsADirectory, which is not NotFound.
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+
+        let config = Config::default();
+        assert!(config.save_theme_to(path).is_err());
     }
 }

@@ -1,4 +1,5 @@
 use crate::model::Degradation;
+use crate::ui::format::cell;
 use crate::ui::theme::Theme;
 use ratatui::{
     layout::{Alignment, Rect},
@@ -47,14 +48,18 @@ pub fn render(f: &mut Frame, area: Rect, degradations: &[Degradation], theme: &T
     ];
 
     // The warnings section only appears when the scan actually degraded, so an
-    // empty run stays uncluttered.
+    // empty run stays uncluttered. Messages can embed system-derived text
+    // (error paths), so they pass through the `cell` chokepoint.
     if !degradations.is_empty() {
         help_text.push(Line::raw(""));
         help_text.push(Line::from(Span::styled("WARNINGS", header)));
         for degradation in degradations {
             help_text.push(Line::from(vec![
                 Span::styled("  ⚠ ", Style::default().fg(theme.warn)),
-                Span::styled(degradation.message(), Style::default().fg(theme.warn)),
+                Span::styled(
+                    cell(&degradation.message()),
+                    Style::default().fg(theme.warn),
+                ),
             ]));
         }
     }

@@ -37,7 +37,6 @@ clap = { version = "4", features = ["derive"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "2"
 
 # XDG directories
 directories = "6"
@@ -52,7 +51,6 @@ clap_complete = "4"
 # arboard = "3"
 
 [dev-dependencies]
-insta = { version = "1", features = ["json"] }
 tempfile = "3"
 
 [profile.release]

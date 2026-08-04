@@ -1,43 +1,49 @@
-use crate::model::Degradation;
+use crate::model::{Degradation, Runtime};
 use std::path::Path;
 
-/// Heuristic for I3: detect whether a container runtime is active, and whether
-/// its userland-proxy is likely disabled, so its published ports may be hidden
-/// from `/proc/net`.
+/// Heuristic for I3: detect whether a container runtime is active **without** a
+/// userland proxy, so its published ports may be hidden from `/proc/net`.
 ///
 /// This is intentionally lightweight and best-effort:
-/// - inspect `/proc/<pid>/cgroup` for docker/podman/containerd scopes
+/// - inspect `/proc/<pid>/cgroup` for docker/podman/containerd scopes, using
+///   the same structured parser as per-socket attribution
+///   (`platform/linux/cgroup.rs`), never substring matching
 /// - check for common proxy binaries via `cmdline`
-/// - when we find runtime processes but no `docker-proxy` sibling, emit a
-///   `Degradation::ContainerPortsHidden`
+/// - when runtime processes are found but **no** `docker-proxy` sibling is
+///   visible, emit a `Degradation::ContainerPortsHidden`
+///
+/// The inverse case matters too: when `docker-proxy` IS running, the
+/// userland-proxy is enabled and published ports DO appear in `/proc/net` —
+/// nothing is hidden, so no warning (the earlier implementation warned in both
+/// cases, which put a permanent ⚠ on any box that merely ran Docker).
 ///
 /// We do not read `/proc/<pid>/environ` or call out to any daemon.
 pub fn detect_container_warning(proc_root: &Path) -> Option<Degradation> {
-    let has_docker_proxy = running_docker_proxies(proc_root);
     let runtimes = active_runtimes(proc_root);
     if runtimes.is_empty() {
         return None;
     }
 
-    let msg = if runtimes.len() == 1 && runtimes[0] == "docker" && !has_docker_proxy {
-        format!(
-            "{} active without docker-proxy; published ports may be hidden.",
-            runtimes.join(", ")
-        )
-    } else {
-        format!(
-            "{} active; userland-proxy may be disabled for some published ports.",
-            runtimes.join(", ")
-        )
-    };
+    // docker-proxy present ⇒ userland-proxy enabled ⇒ published ports visible.
+    if running_docker_proxies(proc_root) {
+        return None;
+    }
+
+    let msg = format!(
+        "{} active without docker-proxy; published ports may be hidden.",
+        runtimes.join(", ")
+    );
 
     Some(Degradation::ContainerPortsHidden(msg))
 }
 
-/// Best-effort detection of common container runtimes.
+/// Best-effort detection of active container runtimes.
 ///
 /// This is a static snapshot at scan time. It only needs to be right often
 /// enough to show a useful status-bar hint; a false negative is acceptable.
+/// Runtime attribution goes through `parse_cgroup_line`, so the daemon's own
+/// unit (`docker.service`) and host-level `docker-proxy-…` scopes are not
+/// mistaken for containers.
 fn active_runtimes(proc_root: &Path) -> Vec<&'static str> {
     let mut seen = Vec::new();
 
@@ -54,21 +60,19 @@ fn active_runtimes(proc_root: &Path) -> Vec<&'static str> {
             };
 
             for line in data.lines() {
-                let lowered = line.to_ascii_lowercase();
-                if lowered.contains("docker") && !seen.contains(&"docker") {
-                    seen.push("docker");
-                }
-                if lowered.contains("libpod")
-                    && !seen.contains(&"podman")
-                    && !seen.contains(&"docker")
-                {
-                    seen.push("podman");
-                }
-                if lowered.contains("cri-containerd")
-                    && !seen.contains(&"containerd")
-                    && !seen.contains(&"docker")
-                {
-                    seen.push("containerd");
+                let Some(container) = crate::platform::linux::cgroup::parse_cgroup_line(line)
+                else {
+                    continue;
+                };
+                let name = match container.runtime {
+                    Runtime::Docker => "docker",
+                    Runtime::Podman => "podman",
+                    Runtime::Containerd => "containerd",
+                    Runtime::SystemdNspawn => "systemd-nspawn",
+                    Runtime::Unknown => "container",
+                };
+                if !seen.contains(&name) {
+                    seen.push(name);
                 }
             }
         }
@@ -142,7 +146,10 @@ mod tests {
     }
 
     #[test]
-    fn test_docker_with_proxy_returns_degradation_without_hidden() {
+    fn test_docker_with_proxy_emits_no_degradation() {
+        // docker-proxy IS running: the userland-proxy is enabled, published
+        // ports appear in /proc/net, nothing is hidden. This is the common
+        // dev-box case and must NOT show a ⚠.
         let tmp = TempDir::new().unwrap();
         write_file(tmp.path(), "1234/cmdline", b"/usr/bin/dockerd\x00");
         write_file(
@@ -158,13 +165,23 @@ mod tests {
         write_file(
             tmp.path(),
             "2000/cgroup",
-            b"0::/system.slice/docker-proxy-abc123.scope\n",
+            b"0::/system.slice/docker.service\n",
         );
-        let deg = detect_container_warning(tmp.path());
-        assert!(matches!(deg, Some(Degradation::ContainerPortsHidden(_))));
-        let msg = deg.unwrap().message();
-        assert!(msg.contains("docker"));
-        assert!(msg.contains("userland-proxy"));
+        assert!(detect_container_warning(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn test_docker_daemon_without_containers_emits_no_degradation() {
+        // Only the daemon's own systemd unit is present: no containers, so no
+        // ports can be hidden. A substring match on "docker" would warn here.
+        let tmp = TempDir::new().unwrap();
+        write_file(tmp.path(), "1234/cmdline", b"/usr/bin/dockerd\x00");
+        write_file(
+            tmp.path(),
+            "1234/cgroup",
+            b"0::/system.slice/docker.service\n",
+        );
+        assert!(detect_container_warning(tmp.path()).is_none());
     }
 
     #[test]
