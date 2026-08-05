@@ -74,9 +74,11 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
         lines.push(blank());
     }
 
-    // Project. Paths are shortened to `~/…` when under $HOME so the common case
-    // reads clearly instead of wrapping on the home prefix.
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    // Project. Paths are shortened to `~/…` when under the home dir so the
+    // common case reads clearly instead of wrapping on the home prefix. The
+    // home honours `$SUDO_USER` (via core), so under `sudo portix` paths are
+    // shortened against the invoking user's home, not root's.
+    let home = crate::core::config::display_home();
     lines.push(section("PROJECT"));
     if let Some(project) = &service.project {
         lines.push(kv("Name", cell(&project.name)));

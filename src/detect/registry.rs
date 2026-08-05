@@ -313,7 +313,12 @@ impl DetectorRegistry {
         if cmdline.iter().any(|a| arg_is_program(a, "uvicorn")) {
             // `uvicorn app:app` — an ASGI app target — is the canonical FastAPI
             // dev command. A bare uvicorn with no target is the weaker fallback.
-            if cmdline.iter().any(|arg| is_asgi_app_target(arg)) {
+            // A Django project served through `uvicorn myproject.asgi:application`
+            // matches the target shape too, but manage.py says Django: the
+            // target signal would mislabel it FastAPI, so it degrades to the
+            // bare-uvicorn fallback and the manage.py signal carries Django.
+            let django_project = root.is_some_and(|r| r.join("manage.py").exists());
+            if cmdline.iter().any(|arg| is_asgi_app_target(arg)) && !django_project {
                 signals.push(Signal::new(
                     "fastapi",
                     kinds::CMDLINE_MODULE,
@@ -593,6 +598,26 @@ mod tests {
             .detect(Some(dir.path()), Some(&exe), &cmdline, 8000)
             .unwrap();
         assert_eq!(fw.id, "uvicorn");
+    }
+
+    /// A Django project served through uvicorn (`uvicorn myproject.asgi:application`)
+    /// matches the ASGI-target shape but must not be labeled FastAPI: manage.py
+    /// says Django, so the target degrades to a bare uvicorn process.
+    #[test]
+    fn test_django_served_by_uvicorn_is_not_fastapi() {
+        let dir = project(&[("manage.py", "")]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline: Vec<String> = ["python", "-m", "uvicorn", "myproject.asgi:application"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 8000)
+            .unwrap();
+        assert_eq!(
+            fw.id, "uvicorn",
+            "a Django project must never be labeled FastAPI"
+        );
     }
 
     /// Flask run as `python app.py` has no "flask" in its cmdline; the app.py

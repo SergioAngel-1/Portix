@@ -11,7 +11,11 @@ use ratatui::{
     Terminal,
 };
 use serde::Serialize;
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::flag;
 use std::io::{self, IsTerminal};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use portix_lib::core::{Config, Engine};
@@ -303,12 +307,13 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
 }
 
 fn kill_port(engine: &mut Engine, port: u16, force: bool, skip_confirm: bool) -> Result<i32> {
-    // Fresh scan up front: both the confirmation text and the signal must
-    // describe the process that owns the port *now*, not a seconds-old
-    // snapshot. (CPU columns are irrelevant here, so a single scan suffices.)
-    // Unfiltered: `portix --kill 80` is a direct question about a port, and a
-    // display filter must not turn it into a silent "no service" — the
-    // re-scan below (`service_on_port`) is unfiltered for the same reason.
+    let signal = if force { Signal::Kill } else { Signal::Term };
+
+    // Fresh scan up front: the confirmation text must describe the process
+    // that owns the port *now*, not a seconds-old snapshot. (CPU columns are
+    // irrelevant here, so a single scan suffices.) Unfiltered: `portix --kill
+    // 80` is a direct question about a port, and a display filter must not
+    // turn it into a silent "no service".
     let snapshot = engine.scan_unfiltered();
     let owners: Vec<&Service> = snapshot
         .services
@@ -334,35 +339,38 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, skip_confirm: bool) ->
         );
     }
 
-    // The identity pin of the process the confirmation text described. With
-    // `--yes` (or `kill_confirm = false` in the config) no text was shown, so
-    // nobody was confirmed: whoever owns the port when the signal is sent is
-    // the target.
-    let expected = if skip_confirm {
-        None
-    } else {
-        let pid = service
-            .process
-            .as_ref()
-            .map(|p| p.pid.to_string())
-            .unwrap_or_else(|| "unknown".into());
+    if skip_confirm {
+        // No confirmation was shown, so no identity was pinned: the snapshot
+        // just taken is the target. There is no human delay to guard against
+        // (the re-scan below exists for that), and `signal_service` re-checks
+        // the (pid, starttime) identity against live /proc right before
+        // signalling — via a pidfd pin — which closes the millisecond window.
+        engine.signal_service(service, signal)?;
+        eprintln!("Sent {signal:?} to service on port {port}");
+        return Ok(exit::OK);
+    }
 
-        eprint!(
-            "Kill {} on port {port} (pid {pid})? [y/N] ",
-            cell(&service.project_display())
-        );
-        io::Write::flush(&mut io::stderr())?;
+    // The identity pin of the process the confirmation text described.
+    let pid = service
+        .process
+        .as_ref()
+        .map(|p| p.pid.to_string())
+        .unwrap_or_else(|| "unknown".into());
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        if !matches!(input.trim(), "y" | "Y" | "yes") {
-            eprintln!("Cancelled.");
-            return Ok(exit::OK);
-        }
-        owner_pin(service)
-    };
+    eprint!(
+        "Kill {} on port {port} (pid {pid})? [y/N] ",
+        cell(&service.project_display())
+    );
+    io::Write::flush(&mut io::stderr())?;
 
-    let signal = if force { Signal::Kill } else { Signal::Term };
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if !matches!(input.trim(), "y" | "Y" | "yes") {
+        eprintln!("Cancelled.");
+        return Ok(exit::OK);
+    }
+    let expected = owner_pin(service);
+
     // The user may have taken seconds to answer; re-resolve from a fresh scan
     // so the signal targets the process currently on this port, not a ghost.
     let service = match engine.service_on_port(port) {
@@ -400,6 +408,17 @@ fn run_tui(config: Config, mut engine: Engine, theme: Theme, color: bool) -> Res
         anyhow::bail!("stdout is not a terminal; use --once or --json");
     }
 
+    // A termination signal must exit through the normal restore path below,
+    // not kill the process mid-raw-mode: SIGTERM/SIGHUP/SIGINT (from outside
+    // the terminal — Ctrl+C inside raw mode arrives as a key event instead)
+    // set this flag, and the event loop checks it and returns cleanly. The
+    // handlers are registered before raw mode, so a signal during startup is
+    // caught too.
+    let interrupted = Arc::new(AtomicBool::new(false));
+    for sig in [SIGTERM, SIGHUP, SIGINT] {
+        flag::register(sig, Arc::clone(&interrupted))?;
+    }
+
     enable_raw_mode()?;
     // From here on, every exit path must restore the terminal — leaving a
     // user in raw mode on the alternate screen is worse than the error.
@@ -409,7 +428,14 @@ fn run_tui(config: Config, mut engine: Engine, theme: Theme, color: bool) -> Res
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = event_loop(&mut terminal, config, &mut engine, theme, color);
+    let result = event_loop(
+        &mut terminal,
+        config,
+        &mut engine,
+        theme,
+        color,
+        interrupted,
+    );
 
     // Restore the terminal even if the loop failed. Leaving a user in raw mode
     // on the alternate screen is worse than whatever error got us here.
@@ -426,6 +452,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     engine: &mut Engine,
     theme: Theme,
     color: bool,
+    interrupted: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut app = App::new(config.clone(), theme, color);
     app.update_snapshot(engine.scan());
@@ -434,6 +461,14 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_scan = Instant::now();
 
     loop {
+        // A termination signal (SIGTERM/SIGHUP/kill -INT) must exit through
+        // this path so `run_tui` restores the terminal. The signal handler
+        // sets the flag; `poll` returns on the EINTR it provokes, so the
+        // check below wakes promptly instead of sleeping out the timeout.
+        if interrupted.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         terminal.draw(|f| draw(f, &app))?;
 
         // Wake up for input, but never sleep past the next refresh.
@@ -455,6 +490,12 @@ fn event_loop<B: ratatui::backend::Backend>(
                     }
                 }
             }
+        }
+
+        // A signal that arrived while blocked in poll (or handled as a key
+        // event above) still ends the loop cleanly.
+        if interrupted.load(Ordering::Relaxed) {
+            return Ok(());
         }
 
         if last_scan.elapsed() >= refresh {

@@ -32,9 +32,6 @@ pub trait PlatformProbe {
     /// matches the live process (PID reuse).
     fn signal(&self, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()>;
 
-    /// UID of the calling process.
-    fn current_uid(&self) -> u32;
-
     /// System-wide CPU jiffies, for computing per-process CPU shares.
     fn total_jiffies(&self) -> Option<u64>;
 
@@ -51,9 +48,6 @@ pub trait PlatformProbe {
 
     /// Resolve a numeric UID to a username via NSS (`getpwuid_r`), if any.
     fn username_for_uid(&self, uid: u32) -> Option<String>;
-
-    /// Get the root path for /proc (or equivalent).
-    fn proc_root(&self) -> &Path;
 }
 
 /// Default platform probe using /proc.
@@ -92,13 +86,6 @@ impl PlatformProbe for LinuxProbe {
         linux::signal::send_signal(&self.proc_root, pid, expected_starttime, sig)
     }
 
-    fn current_uid(&self) -> u32 {
-        // Falls back to the real uid when the proc root is synthetic and has no
-        // `self/` entry, which is the normal case in tests. The syscall (and its
-        // `unsafe`) lives in `platform::linux`, never here.
-        linux::proc::current_uid(&self.proc_root).unwrap_or_else(linux::proc::real_uid)
-    }
-
     fn total_jiffies(&self) -> Option<u64> {
         linux::metrics::get_total_jiffies(&self.proc_root)
     }
@@ -116,9 +103,5 @@ impl PlatformProbe for LinuxProbe {
 
     fn username_for_uid(&self, uid: u32) -> Option<String> {
         linux::proc::uid_to_username(uid)
-    }
-
-    fn proc_root(&self) -> &Path {
-        &self.proc_root
     }
 }

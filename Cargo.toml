@@ -47,6 +47,11 @@ directories = "6"
 # System calls
 libc = "0.2"
 
+# Termination signals: exit through the normal restore path so the terminal
+# is never left in raw mode (SIGTERM/SIGHUP/SIGINT otherwise kill without
+# unwinding, stranding the user's terminal without echo).
+signal-hook = "0.3"
+
 # Shell completions
 clap_complete = "4"
 

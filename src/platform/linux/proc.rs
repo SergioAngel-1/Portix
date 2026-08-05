@@ -74,28 +74,6 @@ pub fn read_starttime_jiffies(proc_root: &Path, pid: i32) -> Option<u64> {
     read_stat(proc_root, &pid_dir).map(|s| s.starttime_jiffies)
 }
 
-/// Read the UID of the calling process, honoring the injected proc root.
-pub fn current_uid(proc_root: &Path) -> Option<u32> {
-    let content = std::fs::read_to_string(proc_root.join("self").join("status")).ok()?;
-    content
-        .lines()
-        .find_map(|l| l.strip_prefix("Uid:"))
-        .and_then(|v| v.split_whitespace().next())
-        .and_then(|s| s.parse().ok())
-}
-
-/// Real UID of the calling process via the `getuid(2)` syscall.
-///
-/// The fallback for when the injected proc root has no readable `self/status`
-/// (the normal case in tests). The `unsafe` lives here, in `platform::linux`,
-/// the only layer permitted to touch raw syscalls.
-pub fn real_uid() -> u32 {
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::getuid()
-    }
-}
-
 /// Read /proc/<pid>/cmdline (null-separated).
 fn read_cmdline(pid_dir: &Path) -> Option<Vec<String>> {
     let bytes = std::fs::read(pid_dir.join("cmdline")).ok()?;

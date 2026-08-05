@@ -64,6 +64,30 @@ impl Default for Config {
     }
 }
 
+/// Home of the user who invoked `sudo portix`, when running under sudo.
+///
+/// sudo resets `$HOME` to the root user's (PRD §13.3): without this, the
+/// invoking user's config would be ignored, a theme save would land in
+/// `/root/.config`, and `~/…` path shortening would use the wrong prefix.
+/// `None` when there is no `$SUDO_USER` to honor, or it does not resolve.
+fn sudo_user_home() -> Option<PathBuf> {
+    let user = std::env::var("SUDO_USER").ok()?;
+    if user.is_empty() {
+        return None;
+    }
+    crate::platform::linux::proc::home_dir_for_user(&user)
+}
+
+/// The home directory display paths are shortened against (`~/…`).
+///
+/// Same `$SUDO_USER` logic as [`sudo_user_home`] so the info panel and the
+/// config loader agree under `sudo portix`; falls back to `$HOME`. Lives in
+/// `core` because the passwd lookup goes through `platform`, which `ui` must
+/// not import.
+pub fn display_home() -> Option<PathBuf> {
+    sudo_user_home().or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+}
+
 /// The directory holding `config.toml`, honoring XDG.
 ///
 /// Under `sudo portix` (PRD §13.3), sudo resets `$HOME` to the root user's:
@@ -72,12 +96,8 @@ impl Default for Config {
 /// passwd instead. Falls back to the XDG resolution (which itself falls back
 /// to `~/.config/portix`) when there is no `$SUDO_USER` to honor.
 fn config_dir() -> PathBuf {
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        if !user.is_empty() {
-            if let Some(home) = crate::platform::linux::proc::home_dir_for_user(&user) {
-                return home.join(".config/portix");
-            }
-        }
+    if let Some(home) = sudo_user_home() {
+        return home.join(".config/portix");
     }
     directories::ProjectDirs::from("", "", "portix")
         .map(|d| d.config_dir().to_path_buf())

@@ -336,14 +336,13 @@ impl Engine {
             };
             // First sight of a process yields None: there is no delta yet.
             if let Some(prev) = self.cache.swap_cpu_sample(key, current) {
-                process.metrics.cpu_percent =
-                    crate::platform::linux::metrics::calculate_cpu_percent(
-                        prev.proc_jiffies,
-                        prev.total_jiffies,
-                        current.proc_jiffies,
-                        current.total_jiffies,
-                        self.cpu_scale_factor(),
-                    );
+                process.metrics.cpu_percent = crate::core::cpu::calculate_cpu_percent(
+                    prev.proc_jiffies,
+                    prev.total_jiffies,
+                    current.proc_jiffies,
+                    current.total_jiffies,
+                    self.cpu_scale_factor(),
+                );
             }
         }
 
@@ -450,12 +449,18 @@ fn epoch_secs() -> u64 {
 /// Two sockets of the *same* IP version on one port and pid (SO_REUSEPORT
 /// workers, or explicit binds like 127.0.0.1 + 0.0.0.0) are genuinely distinct
 /// listeners and are never merged.
+///
+/// Each key parks a *queue* of rows per IP version, so several v4+v6 pairs on
+/// one port (127.0.0.1 + 0.0.0.0 plus [::1] + [::]) each merge independently.
+/// The old single-slot parking left the second pair as two orphan rows
+/// whenever `/proc` listed both v4s before both v6s — its natural file order.
 fn merge_dual_stack(services: Vec<Service>) -> Vec<Service> {
-    // One slot per IP version per identity: the first v4 parks here to be
-    // paired with a later v6; a parked v6 is paired with a later v4. Same-
-    // version duplicates get their own rows.
-    let mut v4_slot: HashMap<(i32, u16, Family), usize> = HashMap::new();
-    let mut v6_slot: HashMap<(i32, u16, Family), usize> = HashMap::new();
+    use std::collections::VecDeque;
+    // One queue of parked row indices per identity per IP version: the first
+    // of each version waits here to be paired with the other version;
+    // same-version duplicates beyond the first keep their own rows.
+    let mut v4_queue: HashMap<(i32, u16, Family), VecDeque<usize>> = HashMap::new();
+    let mut v6_queue: HashMap<(i32, u16, Family), VecDeque<usize>> = HashMap::new();
     let mut out: Vec<Service> = Vec::with_capacity(services.len());
 
     for service in services {
@@ -468,24 +473,21 @@ fn merge_dual_stack(services: Vec<Service>) -> Vec<Service> {
         let key = (pid, service.socket.port, service.socket.protocol.family());
 
         if service.socket.protocol.is_v6() {
-            // Park next to an unattached v4 row: the pair becomes one
-            // dual-stack row with the v6 as survivor.
-            if let Some(&idx) = v4_slot.get(&key) {
-                let kept = &mut out[idx];
-                *kept = service;
-                kept.socket.dual_stack = true;
-                v4_slot.remove(&key);
+            // Pair with a parked v4 row: the pair becomes one dual-stack row
+            // with the v6 as survivor.
+            if let Some(idx) = v4_queue.get_mut(&key).and_then(VecDeque::pop_front) {
+                out[idx] = service;
+                out[idx].socket.dual_stack = true;
             } else {
-                v6_slot.entry(key).or_insert(out.len());
+                v6_queue.entry(key).or_default().push_back(out.len());
                 out.push(service);
             }
         } else {
             // v4: attach to a parked v6 row if one is waiting.
-            if let Some(&idx) = v6_slot.get(&key) {
+            if let Some(idx) = v6_queue.get_mut(&key).and_then(VecDeque::pop_front) {
                 out[idx].socket.dual_stack = true;
-                v6_slot.remove(&key);
             } else {
-                v4_slot.entry(key).or_insert(out.len());
+                v4_queue.entry(key).or_default().push_back(out.len());
                 out.push(service);
             }
         }
@@ -626,6 +628,30 @@ mod tests {
             service(Protocol::Tcp, 3000, Some(1)),
         ]);
         assert_eq!(merged.len(), 2);
+    }
+
+    /// Four sockets on one port — two v4 (127.0.0.1 + 0.0.0.0) and two v6
+    /// ([::1] + [::]) — are two dual-stack pairs, not one pair plus orphans.
+    /// `/proc` lists both v4s before both v6s, which is exactly the order that
+    /// stranded the second pair under the old single-slot parking.
+    #[test]
+    fn test_two_dual_stack_pairs_merge_independently() {
+        let merged = merge_dual_stack(vec![
+            service(Protocol::Tcp, 3000, Some(1)),
+            service(Protocol::Tcp, 3000, Some(1)),
+            service(Protocol::Tcp6, 3000, Some(1)),
+            service(Protocol::Tcp6, 3000, Some(1)),
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        assert!(
+            merged.iter().all(|s| s.socket.dual_stack),
+            "both rows must be dual-stack pairs"
+        );
+        assert!(
+            merged.iter().all(|s| s.socket.protocol.is_v6()),
+            "the survivor of each pair is the v6 socket"
+        );
     }
 
     fn engine_with(config: Config) -> Engine {
