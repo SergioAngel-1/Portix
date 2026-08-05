@@ -21,6 +21,16 @@ pub fn build_inode_map(
     let mut map: HashMap<u64, Vec<(i32, i32)>> = HashMap::new();
     let total_interest = interest_inodes.len();
 
+    // An empty interest set means every socket was filtered out (or none
+    // existed): there is nothing to resolve, so skip the pid listing and the
+    // fd-table walk entirely. The per-inode early-exit below can never fire
+    // for an empty set (map.len() >= 0 is always true but the old
+    // `!interest_inodes.is_empty()` guard made the walk run anyway — ~12k
+    // readlinks for nothing on a typical box).
+    if total_interest == 0 {
+        return Ok(map);
+    }
+
     // Read all PIDs
     let pids = super::proc::list_pids(proc_root)?;
 
@@ -54,9 +64,8 @@ pub fn build_inode_map(
         // Stop once every inode we care about has an owner. Count distinct
         // inodes, not hits: one socket can be held by several fds (dup, forked
         // workers under SO_REUSEPORT), and counting hits stops the scan early
-        // with inodes still unresolved. An empty interest set means there is
-        // nothing to resolve, so the whole walk is pointless.
-        if !interest_inodes.is_empty() && map.len() >= total_interest {
+        // with inodes still unresolved.
+        if map.len() >= total_interest {
             break;
         }
     }
@@ -122,5 +131,17 @@ mod tests {
 
         assert!(map.contains_key(&100), "inode 100 missing");
         assert!(map.contains_key(&200), "scan stopped before reaching pid 2");
+    }
+
+    /// An empty interest set must short-circuit before any filesystem access:
+    /// even a nonexistent proc root resolves to an empty map instead of an
+    /// error, because there is nothing to look up. (The old guard only broke
+    /// the loop *after* the first fd-table walk, so a fully filtered scan
+    /// still paid ~12k readlinks for nothing.)
+    #[test]
+    fn test_empty_interest_skips_the_fs_walk() {
+        let nowhere = tempfile::tempdir().unwrap().path().join("does-not-exist");
+        let map = build_inode_map(&nowhere, &HashSet::new()).unwrap();
+        assert!(map.is_empty());
     }
 }

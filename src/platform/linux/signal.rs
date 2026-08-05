@@ -57,10 +57,18 @@ pub fn send_signal(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Sig
     if fd < 0 {
         let err = std::io::Error::last_os_error();
         return match err.raw_os_error() {
-            // Kernel without pidfd support: fall back to the re-check + kill.
-            Some(libc::ENOSYS) | Some(libc::EINVAL) => {
-                signal_via_kill(proc_root, pid, expected_starttime, sig)
-            }
+            // ENOSYS: kernel without pidfd_open (pre-5.3) — fall back to the
+            // starttime re-check + kill(2), the best those kernels allow.
+            Some(libc::ENOSYS) => signal_via_kill(proc_root, pid, expected_starttime, sig),
+            // EINVAL is *not* "no pidfd support": pidfd_open returns it only
+            // for an invalid pid (pid <= 0). Treat it as a hard error — never
+            // weaken the identity guarantee by falling back to kill(2) for a
+            // pid we could not pin. (A pid read from /proc is always valid,
+            // so this is defensive; a recycled-beyond-pid_max pid surfaces as
+            // ESRCH below instead.)
+            Some(libc::EINVAL) => Err(anyhow!(
+                "refusing to signal PID {pid}: pidfd_open rejected it with EINVAL"
+            )),
             // ESRCH and everything else: the process is gone.
             _ => Err(err.into()),
         };

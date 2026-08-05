@@ -188,8 +188,25 @@ fn scan_with_cpu(engine: &mut Engine) -> SharedSnapshot {
     engine.scan()
 }
 
+/// Like [`scan_with_cpu`], but the samples ignore the display filters.
+///
+/// The CLI query paths (`portix 80`, `portix --json 80`) answer a direct
+/// question about a specific port: hiding system ports or UDP is a table
+/// preference, and applying it here would report "no service" for a port that
+/// is actually listening.
+fn scan_with_cpu_unfiltered(engine: &mut Engine) -> SharedSnapshot {
+    engine.scan_unfiltered();
+    std::thread::sleep(Duration::from_millis(200));
+    engine.scan_unfiltered()
+}
+
 fn print_json(engine: &mut Engine, port: Option<u16>) -> Result<i32> {
-    let snapshot = scan_with_cpu(engine);
+    // A port query answers a direct question, so it scans without the display
+    // filters; the full-snapshot form keeps them — it is a display.
+    let snapshot = match port {
+        Some(_) => scan_with_cpu_unfiltered(engine),
+        None => scan_with_cpu(engine),
+    };
 
     // stdout carries JSON and nothing else; warnings go to stderr.
     match port {
@@ -223,7 +240,9 @@ fn print_json(engine: &mut Engine, port: Option<u16>) -> Result<i32> {
 }
 
 fn print_port(engine: &mut Engine, port: u16) -> Result<i32> {
-    let snapshot = scan_with_cpu(engine);
+    // Unfiltered: the user asked about a specific port; `show_system_ports`
+    // and friends control the table, not the answer to a direct query.
+    let snapshot = scan_with_cpu_unfiltered(engine);
     let Some(service) = snapshot.by_port(port) else {
         eprintln!("No service listening on port {port}");
         return Ok(exit::NO_MATCH);
@@ -287,7 +306,10 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, skip_confirm: bool) ->
     // Fresh scan up front: both the confirmation text and the signal must
     // describe the process that owns the port *now*, not a seconds-old
     // snapshot. (CPU columns are irrelevant here, so a single scan suffices.)
-    let snapshot = engine.scan();
+    // Unfiltered: `portix --kill 80` is a direct question about a port, and a
+    // display filter must not turn it into a silent "no service" — the
+    // re-scan below (`service_on_port`) is unfiltered for the same reason.
+    let snapshot = engine.scan_unfiltered();
     let owners: Vec<&Service> = snapshot
         .services
         .iter()
@@ -710,22 +732,18 @@ mod tests {
         assert_eq!(code, exit::NO_MATCH);
     }
 
-    /// `--kill` on a fixture service runs the full path up to the signal,
-    /// which fails deterministically on a synthetic pid: a pid beyond pid_max
-    /// can never be pinned by pidfd_open nor hit by kill(2), so the test can
-    /// never signal a real process.
-    #[test]
-    fn test_kill_port_reaches_signal_and_fails_on_synthetic_pid() {
+    /// A synthetic /proc root with one TCP LISTEN socket on `port`, owned by
+    /// `pid`, whose fd table links the socket inode.
+    fn synthetic_listener_proc(port: u16, pid: i32) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        // 9_000_000 > pid_max (default 4194304): pidfd_open rejects it with
-        // EINVAL and kill(2) with ESRCH — the signal step fails safely.
-        let pid: i32 = 9_000_000;
         std::fs::write(root.join("stat"), "cpu  1 2 3 4\nbtime 1700000000\n").unwrap();
         std::fs::create_dir_all(root.join("net")).unwrap();
         std::fs::write(
             root.join("net/tcp"),
-            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 777001 1 0000 100 0 0 10 0\n",
+            format!(
+                "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 777001 1 0000 100 0 0 10 0\n"
+            ),
         )
         .unwrap();
         let pdir = root.join(pid.to_string());
@@ -742,12 +760,39 @@ mod tests {
         .unwrap();
         std::fs::write(pdir.join("cmdline"), b"node\x00server.js\x00").unwrap();
         std::os::unix::fs::symlink("socket:[777001]", pdir.join("fd/3")).unwrap();
+        dir
+    }
 
-        let engine = &mut Engine::new(Some(root), Config::default());
+    /// `--kill` on a fixture service runs the full path up to the signal,
+    /// which fails deterministically on a synthetic pid: a pid beyond pid_max
+    /// can never be pinned by pidfd_open nor hit by kill(2) (ESRCH on modern
+    /// kernels, "No such process"), so the test can never signal a real
+    /// process.
+    #[test]
+    fn test_kill_port_reaches_signal_and_fails_on_synthetic_pid() {
+        let dir = synthetic_listener_proc(8080, 9_000_000);
+        let engine = &mut Engine::new(Some(dir.path()), Config::default());
         let err = kill_port(engine, 8080, false, true).unwrap_err();
         assert!(
             err.to_string().contains("process"),
             "the signal step must fail on the synthetic pid: {err}"
+        );
+    }
+
+    /// `--kill 80` must see system ports: a port query answers a direct
+    /// question, and the table filter for system ports must not turn it into a
+    /// silent "no service" (which would make `portix :80 || pnpm dev` start a
+    /// server on a taken port).
+    #[test]
+    fn test_kill_port_sees_system_ports_despite_display_filter() {
+        let dir = synthetic_listener_proc(80, 9_000_000);
+        let engine = &mut Engine::new(Some(dir.path()), Config::default());
+        // The port is found (filters off) and the signal step fails on the
+        // synthetic pid — never an Ok(NO_MATCH) "no service" answer.
+        let err = kill_port(engine, 80, false, true).unwrap_err();
+        assert!(
+            err.to_string().contains("process"),
+            "port 80 must be found and the signal step must fail safely: {err}"
         );
     }
 }

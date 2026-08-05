@@ -63,8 +63,15 @@ impl Engine {
     /// This is the only safe way to turn a port into a kill target: the
     /// snapshot the UI holds can be seconds old, and the process behind a port
     /// may have exited and been replaced in that window.
+    ///
+    /// The scan ignores the display filters (`show_system_ports`,
+    /// `show_loopback_only`, `show_udp`): this is the CLI kill path, which
+    /// asks a direct question about a port — a filter meant for the table must
+    /// not hide the kill target. (The TUI kill path goes through
+    /// [`Self::service_on_inode`] instead, which keeps the filters: a row the
+    /// user can select is by definition visible.)
     pub fn service_on_port(&mut self, port: u16) -> Option<Service> {
-        let snapshot = self.scan();
+        let snapshot = self.scan_unfiltered();
         snapshot.by_port(port).cloned()
     }
 
@@ -87,6 +94,23 @@ impl Engine {
     /// `degradations` instead of erroring, so the UI always has a frame to
     /// draw. `Degradation::ScanFailed` is the "the scan itself failed" signal.
     pub fn scan(&mut self) -> SharedSnapshot {
+        self.scan_inner(true)
+    }
+
+    /// Like [`Self::scan`], but ignoring the display filters
+    /// (`show_system_ports`, `show_loopback_only`, `show_udp`).
+    ///
+    /// Used by the CLI query paths (`portix 80`, `portix --json 80`,
+    /// `portix --kill 80`): those answer a direct question about a specific
+    /// port, and a filter that exists to keep the table readable must not make
+    /// the tool report "no service" for a port that is actually listening
+    /// (which would e.g. make `portix :80 || pnpm dev` start a server on a
+    /// taken port).
+    pub fn scan_unfiltered(&mut self) -> SharedSnapshot {
+        self.scan_inner(false)
+    }
+
+    fn scan_inner(&mut self, apply_filters: bool) -> SharedSnapshot {
         let start = Instant::now();
         let mut degradations = Vec::new();
 
@@ -95,10 +119,14 @@ impl Engine {
             Err(e) => return Arc::new(self.empty_snapshot(start, e)),
         };
 
-        let sockets: Vec<Socket> = sockets
-            .into_iter()
-            .filter(|s| self.socket_passes_filters(s))
-            .collect();
+        let sockets: Vec<Socket> = if apply_filters {
+            sockets
+                .into_iter()
+                .filter(|s| self.socket_passes_filters(s))
+                .collect()
+        } else {
+            sockets
+        };
 
         let interest: HashSet<u64> = sockets.iter().map(|s| s.inode).collect();
         let inode_map = self.platform.build_inode_map(&interest).unwrap_or_default();
