@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portix is a Rust TUI for Linux that lists every listening socket, resolves it to the owning process, and from that process infers **the project it belongs to** (root dir, name, language, framework, package manager, container). The port is the index; the project context is the product.
 
-`PRD.md` (2140 lines, Spanish) is the authoritative spec — architecture, `/proc` parsing traps, cache design, security model, roadmap. Consult the relevant section before implementing anything non-trivial; it documents decisions and their rationale in enough detail to implement without further research. The code is currently an MVP-in-progress and lags the PRD in places.
+`PRD.md` (2140 lines, Spanish) is the authoritative spec — architecture, `/proc` parsing traps, cache design, security model, roadmap. Consult the relevant section before implementing anything non-trivial; it documents decisions and their rationale in enough detail to implement without further research. The code is currently an MVP-in-progress and lags the PRD in places. **`PRD.md` is local-only: it is gitignored and not present in clones** — if you are working from a checkout without it, proceed from this file and the code, and do not re-create a PRD from memory.
 
 ## Commands
 

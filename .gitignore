@@ -1,2 +1,5 @@
 /target
 .mimocode/
+
+# PRD is the local working spec: never versioned, always present on this machine.
+/PRD.md
