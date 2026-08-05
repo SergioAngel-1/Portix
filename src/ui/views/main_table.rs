@@ -4,7 +4,7 @@ use crate::ui::theme::Theme;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
-    widgets::{Row, Table, TableState},
+    widgets::{Cell, Row, Table, TableState},
     Frame,
 };
 
@@ -15,6 +15,7 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
     let header = Row::new(vec![
         "PORT",
         "PROTO",
+        "SCOPE",
         "PROJECT",
         "FRAMEWORK",
         "COMMAND",
@@ -38,6 +39,15 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
             // (project names, argv). `cell` is the sanitizing chokepoint.
             let port = format!("{:>5}", service.socket.port);
             let proto = service.socket.proto_display();
+            let scope = Cell::from(service.socket.scope_label()).style(
+                if service.socket.is_network_bound() {
+                    Style::default()
+                        .fg(theme.warn)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.ok)
+                },
+            );
             let project = cell(&truncate_center(&service.project_display(), 20));
             let framework = cell(&truncate_center(&service.framework_display(), 16));
             let command = cell(&truncate_center(&service.command_display(), 16));
@@ -59,7 +69,16 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
                 .unwrap_or_else(|| DASH.to_string());
 
             Row::new(vec![
-                port, proto, project, framework, command, pid, cpu, mem, uptime,
+                port.into(),
+                proto.into(),
+                scope,
+                project.into(),
+                framework.into(),
+                command.into(),
+                pid.into(),
+                cpu.into(),
+                mem.into(),
+                uptime.into(),
             ])
         })
         .collect();
@@ -67,6 +86,7 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
     let widths = [
         ratatui::layout::Constraint::Length(6),
         ratatui::layout::Constraint::Length(6),
+        ratatui::layout::Constraint::Length(8),
         ratatui::layout::Constraint::Min(15),
         ratatui::layout::Constraint::Length(17),
         ratatui::layout::Constraint::Length(17),

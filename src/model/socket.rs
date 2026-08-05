@@ -134,6 +134,15 @@ pub struct Socket {
 }
 
 impl Socket {
+    /// Stable label for tables and the `scope:` search filter.
+    pub fn scope_label(&self) -> &'static str {
+        match self.bind_scope {
+            BindScope::Loopback => "local",
+            BindScope::AllInterfaces => "all",
+            BindScope::Specific(_) => "address",
+        }
+    }
+
     /// Create a URL for this socket.
     ///
     /// A service bound to a specific non-loopback address is opened on that
@@ -167,6 +176,12 @@ impl Socket {
 
     pub fn is_loopback(&self) -> bool {
         self.bind_scope == BindScope::Loopback
+    }
+
+    /// Whether this socket is bound beyond the loopback interface.
+    /// Firewall and routing rules still determine actual reachability.
+    pub fn is_network_bound(&self) -> bool {
+        !self.is_loopback()
     }
 }
 
@@ -223,5 +238,19 @@ mod tests {
         assert_eq!(v4.url(), "http://192.168.1.5:3000");
         let v6 = socket("2001:db8::1".parse().unwrap(), 3000);
         assert_eq!(v6.url(), "http://[2001:db8::1]:3000");
+    }
+
+    #[test]
+    fn test_scope_labels_distinguish_local_and_network_binds() {
+        let local = socket("127.0.0.1".parse().unwrap(), 3000);
+        let all = socket("0.0.0.0".parse().unwrap(), 3000);
+        let address = socket("192.168.1.5".parse().unwrap(), 3000);
+
+        assert_eq!(local.scope_label(), "local");
+        assert!(!local.is_network_bound());
+        assert_eq!(all.scope_label(), "all");
+        assert!(all.is_network_bound());
+        assert_eq!(address.scope_label(), "address");
+        assert!(address.is_network_bound());
     }
 }
