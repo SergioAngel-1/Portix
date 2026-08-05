@@ -12,11 +12,13 @@ a container.
 
 ```
 PORT   PROTO  PROJECT              FRAMEWORK          COMMAND            PID     CPU     MEM   UPTIME
- 3000  tcp    my-shop              Next.js            next-server       48213   0.3%   214M    2h14m
+ 3000  tcp*   my-shop              Next.js            next-server       48213   0.3%   214M    2h14m
  5173  tcp    docs-site            Vite               node              51002   0.0%    98M      12m
- 8000  tcp    api                  FastAPI            python3.13         7781   1.2%   120M      44m
+ 8000  tcp    api                  FastAPI · Uvicorn   python3.13         7781   1.2%   120M      44m
  5432  tcp    —                    —                  postgres           1234   0.1%    45M       3d
 ```
+
+(`tcp*` means one service listening on both IPv4 and IPv6.)
 
 ## What it does
 
@@ -27,9 +29,12 @@ PORT   PROTO  PROJECT              FRAMEWORK          COMMAND            PID    
   the nearest manifest (`package.json`, `Cargo.toml`, `pyproject.toml`,
   `go.mod`, …) and reads the project name, package manager, and workspace.
 - **The framework** — from the command, the manifest dependencies, and config
-  files. Recognizes Next.js, Vite, Astro, Nuxt, Remix, NestJS, Express,
+  files. Recognizes Next.js, Vite, Astro, Nuxt, Remix, NestJS, Express, React,
   FastAPI, Django, Flask, Uvicorn, Gunicorn, Go and Rust.
-- **Containers** — flags processes running under Docker, Podman, or containerd.
+- **Containers** — flags processes running under Docker, Podman, containerd,
+  or systemd-nspawn. A port published through Docker's userland proxy is
+  attributed to the destination container (showing its IP) instead of the
+  `docker-proxy` process.
 - **Actions on the spot** — open the URL in your browser, copy it, or kill the
   process, right from the list.
 
@@ -40,10 +45,8 @@ ever. It reads `/proc`, and nothing else leaves your machine.
 
 ### From the AUR (Arch, CachyOS, …)
 
-```bash
-# with an AUR helper
-paru -S portix-git      # or: yay -S portix-git
-```
+No package is published yet — install from source below. (When a `portix-git`
+PKGBUILD exists, it will be linked here.)
 
 ### From source
 
@@ -95,7 +98,7 @@ You get a live, auto-refreshing table. Move around and act with single keys:
 | `j` / `↓`      | Move down                                |
 | `k` / `↑`      | Move up                                  |
 | `g` / `G`      | Jump to top / bottom                     |
-| `Enter` / `l`  | Open the detail panel for a service      |
+| `i` / `Enter` / `l` | Open the detail panel for a service  |
 | `h` / `Esc`    | Close the detail panel                   |
 | `/`            | Search (filters as you type)             |
 | `o`            | Open the service URL in your browser     |
@@ -103,19 +106,25 @@ You get a live, auto-refreshing table. Move around and act with single keys:
 | `x`            | Kill the process (SIGTERM)               |
 | `X`            | Force-kill the process (SIGKILL)         |
 | `r`            | Refresh now                              |
+| `t`            | Theme picker (live preview, `Enter` saves) |
 | `?`            | Help                                     |
 | `q`            | Quit                                     |
 
 Killing asks for confirmation first, and re-checks the process identity the
 instant before signaling — so a PID that got recycled between the list and your
-keypress is never the one that gets killed.
+keypress is never the one that gets killed, and a port that changed owners while
+you were deciding is refused instead of killing the new process.
+
+When a scan is degraded (unreadable processes, sockets without an owner,
+container ports that may be hidden), the footer shows a `⚠N` count; `?` unfolds
+the details.
 
 ## Using it from the command line
 
 Portix is also a normal CLI, handy in scripts and one-liners.
 
 ```bash
-# What's on port 3000? (accepts 3000 or :3000)
+# What's on port 3000? (accepts 3000, :3000, or --port 3000)
 portix 3000
 # → :3000 my-shop Next.js pid 48213
 # Prints nothing and exits with code 3 if the port is free — so you can do:
@@ -133,6 +142,10 @@ portix --kill 3000        # asks to confirm, sends SIGTERM
 portix --kill 3000 --force --yes   # SIGKILL, no prompt
 ```
 
+Exit codes: `0` success · `1` error · `2` bad usage (clap) · `3` nothing
+listening on that port. JSON output is wrapped in `schema_version` (currently
+`1`) so consumers can detect breaking changes.
+
 ### Useful flags
 
 | Flag                 | What it does                                        |
@@ -144,8 +157,9 @@ portix --kill 3000 --force --yes   # SIGKILL, no prompt
 | `--yes`              | Skip the kill confirmation                          |
 | `--interval <MS>`    | Refresh interval for the TUI                        |
 | `--system-ports`     | Include ports below 1024                            |
-| `--no-color`         | Disable colors                                      |
+| `--no-color`         | Disable colors (the `NO_COLOR` env var does too)    |
 | `--completions <SH>` | Print shell completions (`bash`, `zsh`, `fish`, …)  |
+| `--proc-root <PATH>` | Read `/proc` from an alternative root (tests, containers) |
 
 ### Shell completions
 
@@ -158,14 +172,31 @@ portix --completions zsh  > ~/.zfunc/_portix
 portix --completions fish > ~/.config/fish/completions/portix.fish
 ```
 
-(The AUR package installs these for you.)
+## Configuration
+
+Portix reads `~/.config/portix/config.toml` (XDG). All keys are optional:
+
+```toml
+theme = "default-dark"      # default-dark | mono | auto (pick it live with `t`)
+refresh_ms = 1000           # TUI refresh interval (clamped to >= 200)
+show_udp = true             # show UDP listeners
+show_system_ports = false   # include ports below 1024
+show_loopback_only = false  # only services bound to localhost
+cpu_scale = "system"        # "system" (0-100%) or "core" (per-core, like top)
+kill_confirm = true         # ask before killing (x/X)
+```
+
+Unknown keys are ignored (v1 features can appear without breaking parsing),
+and the file is created on first theme save. Under `sudo portix`, the
+invoking user's config is read instead of root's.
 
 ## Privacy & safety
 
 Portix is built to be safe to run against your own machine:
 
 - **No network. Ever.** No telemetry, no update checks. The only thing it opens
-  outward is your browser, on a `localhost` URL, when you press `o`.
+  outward is your browser, on a `localhost` URL (or the exact address a service
+  is bound to), when you press `o`.
 - **No elevated privileges.** Ports owned by other users simply show a partial
   row instead of erroring. It never asks for `sudo`.
 - **It never reads process environments** (`/proc/<pid>/environ`), where secrets
