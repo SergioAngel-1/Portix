@@ -181,7 +181,10 @@ impl App {
                             .process
                             .as_ref()
                             .map(|p| (p.pid, p.starttime_jiffies));
-                        effects.push(Effect::Kill(service.socket.port, pin, signal));
+                        // The inode pins the exact row the modal showed: even
+                        // with several processes on the same port, the runner
+                        // re-resolves *this* socket, never a sibling.
+                        effects.push(Effect::Kill(service.socket.inode, pin, signal));
                     }
                     self.mode = Mode::Normal;
                 }
@@ -247,14 +250,16 @@ impl App {
         if self.config.kill_confirm {
             // Defer to main.rs: the snapshot this selection came from can be
             // seconds old. The confirm modal must describe the process that
-            // owns the port *now*, so run_effect re-resolves from a fresh scan
-            // and arms the modal with the current owner (Effect::KillRequest).
-            effects.push(Effect::KillRequest(service.socket.port, signal));
+            // owns this socket *now*, so run_effect re-resolves from a fresh
+            // scan and arms the modal with the current owner
+            // (Effect::KillRequest). The inode — not the port — is what pins
+            // the selected row among siblings on the same port.
+            effects.push(Effect::KillRequest(service.socket.inode, signal));
         } else {
             // No confirmation was shown, so there is no identity to pin: the
-            // runner kills whoever owns the port *now* (the stale snapshot is
-            // never trusted as a signal target).
-            effects.push(Effect::Kill(service.socket.port, None, signal));
+            // runner kills whoever owns the socket *now* (the stale snapshot
+            // is never trusted as a signal target).
+            effects.push(Effect::Kill(service.socket.inode, None, signal));
         }
     }
 
@@ -318,18 +323,20 @@ impl App {
 pub enum Effect {
     Quit,
     OpenBrowser(String),
-    /// Ask main.rs to re-resolve the service on `port` from a fresh scan and
-    /// arm the kill-confirmation modal with it. Only emitted when
-    /// `config.kill_confirm` is on; the modal must not describe a stale
-    /// snapshot while the signal targets a different process.
-    KillRequest(u16, Signal),
-    /// Kill the service currently listening on `port`. `expected` is the
+    /// Ask main.rs to re-resolve the exact socket (by inode) from a fresh
+    /// scan and arm the kill-confirmation modal with it. The inode, not the
+    /// port, is the row's identity: several processes can share one port
+    /// (SO_REUSEPORT workers, containers), and the modal must describe the
+    /// row the user selected, not the first one on the port. Only emitted
+    /// when `config.kill_confirm` is on.
+    KillRequest(u64, Signal),
+    /// Kill the service owning the socket inode. `expected` is the
     /// `(pid, starttime)` identity of the process the user *confirmed* in the
     /// modal — `None` when no confirmation was shown (immediate kill). The
     /// runner must refuse to signal if the current owner no longer matches:
-    /// the port can be re-bound while the modal is open, and killing the new
-    /// owner would kill a process the user never confirmed.
-    Kill(u16, Option<(i32, u64)>, Signal),
+    /// the owner can change while the modal is open, and signalling a
+    /// different process would kill something the user never confirmed.
+    Kill(u64, Option<(i32, u64)>, Signal),
     CopyToClipboard(String),
     Refresh,
     /// Persist the current config (theme) to disk.
@@ -414,12 +421,11 @@ mod tests {
     #[test]
     fn test_x_requests_confirmation_then_sends_sigterm() {
         let mut app = app_with_services(1);
-        // 'x' defers to main.rs: re-resolve and arm the modal.
+        // 'x' defers to main.rs: re-resolve and arm the modal. The request
+        // carries the row's socket inode (0 in this fixture), not just the
+        // port.
         let effects = app.handle_key(key('x'));
-        assert!(matches!(
-            effects[0],
-            Effect::KillRequest(3000, Signal::Term)
-        ));
+        assert!(matches!(effects[0], Effect::KillRequest(0, Signal::Term)));
         assert_eq!(app.mode, Mode::Normal);
 
         // main.rs arms the modal with the freshly re-resolved service.
@@ -431,7 +437,7 @@ mod tests {
         let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
         assert!(matches!(
             effects[0],
-            Effect::Kill(3000, Some((100, 7)), Signal::Term)
+            Effect::Kill(0, Some((100, 7)), Signal::Term)
         ));
         assert_eq!(app.mode, Mode::Normal);
     }
@@ -441,10 +447,7 @@ mod tests {
     fn test_capital_x_confirms_to_sigkill() {
         let mut app = app_with_services(1);
         let effects = app.handle_key(key('X'));
-        assert!(matches!(
-            effects[0],
-            Effect::KillRequest(3000, Signal::Kill)
-        ));
+        assert!(matches!(effects[0], Effect::KillRequest(0, Signal::Kill)));
 
         let service = app.selected_service().unwrap().clone();
         app.arm_kill(service, Signal::Kill);
@@ -453,7 +456,7 @@ mod tests {
         let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
         assert!(matches!(
             effects[0],
-            Effect::Kill(3000, Some((100, 7)), Signal::Kill)
+            Effect::Kill(0, Some((100, 7)), Signal::Kill)
         ));
     }
 
@@ -494,7 +497,33 @@ mod tests {
         app.arm_kill(service, Signal::Term);
 
         let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(effects[0], Effect::Kill(3000, None, Signal::Term)));
+        assert!(matches!(effects[0], Effect::Kill(0, None, Signal::Term)));
+    }
+
+    /// Two processes on one port (SO_REUSEPORT workers): the kill request must
+    /// carry the inode of the *selected* row, not just the port — otherwise
+    /// the modal would describe the first owner on the port while the user
+    /// chose the second.
+    #[test]
+    fn test_kill_request_carries_the_selected_rows_inode() {
+        let mut app = app_with_services(1);
+        let service = app.selected_service().unwrap().clone();
+        let snapshot = Arc::new(Snapshot {
+            services: vec![with_inode(service.clone(), 100), with_inode(service, 200)],
+            taken_at_epoch_secs: 0,
+            scan_duration_ms: 1,
+            degradations: Vec::new(),
+        });
+        app.update_snapshot(snapshot);
+        app.selected = 1;
+
+        let effects = app.handle_key(key('x'));
+        assert!(matches!(effects[0], Effect::KillRequest(200, Signal::Term)));
+    }
+
+    fn with_inode(mut service: Service, inode: u64) -> Service {
+        service.socket.inode = inode;
+        service
     }
 
     #[test]

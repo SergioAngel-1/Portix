@@ -39,6 +39,44 @@ impl Degradation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{BindScope, Protocol, ServiceId, Socket, TcpState};
+
+    fn service(inode: u64, port: u16) -> Service {
+        let socket = Socket {
+            protocol: Protocol::Tcp,
+            local_addr: std::net::Ipv4Addr::LOCALHOST.into(),
+            port,
+            state: TcpState::Listen,
+            bind_scope: BindScope::Loopback,
+            inode,
+            uid: 1000,
+            dual_stack: false,
+        };
+        Service {
+            id: ServiceId::from_socket(&socket),
+            socket,
+            process: None,
+            project: None,
+            framework: None,
+            container: None,
+            docker_proxy_rewritten: false,
+        }
+    }
+
+    /// Two processes on one port (SO_REUSEPORT): `by_port` answers the first
+    /// row, `by_inode` the exact one — the identity a kill must carry.
+    #[test]
+    fn test_by_inode_distinguishes_same_port_rows() {
+        let snap = Snapshot {
+            services: vec![service(11, 3000), service(22, 3000)],
+            taken_at_epoch_secs: 0,
+            scan_duration_ms: 0,
+            degradations: vec![],
+        };
+        assert_eq!(snap.by_port(3000).unwrap().socket.inode, 11);
+        assert_eq!(snap.by_inode(22).unwrap().socket.inode, 22);
+        assert!(snap.by_inode(99).is_none());
+    }
 
     #[test]
     fn test_partial_read_message_is_distinct_from_unresolved() {
@@ -81,6 +119,18 @@ impl Snapshot {
     /// Look up the service listening on a port, if any.
     pub fn by_port(&self, port: u16) -> Option<&Service> {
         self.services.iter().find(|s| s.socket.port == port)
+    }
+
+    /// Look up the service owning a specific socket inode, if any.
+    ///
+    /// The inode is the stable identity of a *specific* row: `by_port` returns
+    /// the first of several listeners that can share one port (SO_REUSEPORT
+    /// workers, containers publishing the same port), while the inode pins the
+    /// exact socket the user selected. A rebind closes the old socket and
+    /// reopens a new inode, so an inode lookup misses — which is the safe
+    /// direction for a kill.
+    pub fn by_inode(&self, inode: u64) -> Option<&Service> {
+        self.services.iter().find(|s| s.socket.inode == inode)
     }
 }
 

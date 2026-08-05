@@ -56,3 +56,33 @@ fn test_hostile_comm_survives_full_scan() {
     assert_eq!(process.ppid, 12340);
     assert_eq!(process.threads, 20);
 }
+
+/// A docker-proxy row is rewritten into its destination container, and the
+/// proxy's own project/framework detection is skipped: the proxy's cwd points
+/// at a real project, but the row must show the container — not a project the
+/// proxy never belonged to.
+#[test]
+fn test_docker_proxy_row_skips_project_detection() {
+    let root = fixture_root("docker-proxy");
+    let mut engine = Engine::new(Some(&root), Config::default());
+    let snapshot = engine.scan();
+
+    assert_eq!(snapshot.services.len(), 1);
+    let service = &snapshot.services[0];
+
+    assert!(service.docker_proxy_rewritten);
+    assert!(
+        service.project.is_none(),
+        "proxy rows show the container, not the proxy's cwd project"
+    );
+    assert!(service.framework.is_none());
+
+    let container = service.container.as_ref().expect("container must resolve");
+    assert_eq!(container.runtime, portix_lib::model::Runtime::Docker);
+    assert_eq!(container.id, "172.17.0.2");
+
+    // The original host process is preserved for the UI.
+    let process = service.process.as_ref().expect("process must resolve");
+    assert_eq!(process.pid, 54321);
+    assert_eq!(process.name, "docker-proxy");
+}

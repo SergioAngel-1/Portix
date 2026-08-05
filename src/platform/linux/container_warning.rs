@@ -100,10 +100,16 @@ fn running_docker_proxies(proc_root: &Path) -> bool {
         let Ok(data) = std::fs::read(cmdline) else {
             continue;
         };
-        if data
-            .split(|b| *b == 0)
-            .any(|arg| arg == b"docker-proxy" || arg == b"/usr/bin/docker-proxy")
-        {
+        // Match any argv spelling by basename: distros ship the binary at
+        // /usr/bin/docker-proxy, /usr/libexec/docker/docker-proxy,
+        // /usr/lib/docker/docker-proxy, etc. The old exact-path list missed
+        // everything but /usr/bin and raised a spurious hidden-ports warning
+        // on boxes that do have the userland proxy running.
+        if data.split(|b| *b == 0).any(|arg| {
+            std::path::Path::new(std::str::from_utf8(arg).unwrap_or(""))
+                .file_name()
+                .is_some_and(|f| f == "docker-proxy")
+        }) {
             return true;
         }
     }
@@ -166,6 +172,30 @@ mod tests {
             tmp.path(),
             "2000/cmdline",
             b"/usr/bin/docker-proxy\x00-proto tcp\x00-host-port 5432\x00",
+        );
+        write_file(
+            tmp.path(),
+            "2000/cgroup",
+            b"0::/system.slice/docker.service\n",
+        );
+        assert!(detect_container_warning(tmp.path()).is_none());
+    }
+
+    /// Fedora/RHEL ship docker-proxy under /usr/libexec/docker/. The basename
+    /// match must recognise it, or every such box gets a spurious
+    /// hidden-ports warning.
+    #[test]
+    fn test_docker_with_proxy_at_other_path_emits_no_degradation() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "1234/cgroup",
+            b"0::/system.slice/docker-abc123.scope\n",
+        );
+        write_file(
+            tmp.path(),
+            "2000/cmdline",
+            b"/usr/libexec/docker/docker-proxy\x00-proto tcp\x00-host-port 5432\x00",
         );
         write_file(
             tmp.path(),

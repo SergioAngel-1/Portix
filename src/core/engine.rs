@@ -1,6 +1,6 @@
 use crate::cache::store::CpuSample;
 use crate::cache::CacheStore;
-use crate::core::docker_proxy::rewrite_docker_proxy;
+use crate::core::docker_proxy::{rewrite_docker_proxy, DockerProxyInfo};
 use crate::core::Config;
 use crate::detect::project::{detect_project, manifest_mtime};
 use crate::detect::DetectorRegistry;
@@ -68,6 +68,18 @@ impl Engine {
     pub fn service_on_port(&mut self, port: u16) -> Option<Service> {
         let snapshot = self.scan();
         snapshot.by_port(port).cloned()
+    }
+
+    /// Resolve the service owning a specific socket inode from a fresh scan.
+    ///
+    /// The inode is the identity of the exact row the user selected: with
+    /// several processes on one port (SO_REUSEPORT workers, containers), a
+    /// port alone cannot say *which* row. The inode exists only while that
+    /// socket does — a rebind opens a new inode and resolves to None, which
+    /// is precisely the safe direction for a kill.
+    pub fn service_on_inode(&mut self, inode: u64) -> Option<Service> {
+        let snapshot = self.scan();
+        snapshot.by_inode(inode).cloned()
     }
 
     /// Perform a full scan and return a snapshot.
@@ -160,8 +172,16 @@ impl Engine {
                 None => None,
             };
 
+            // A docker-proxy row is rewritten into its destination container
+            // moments below, discarding project and framework. The proxy's
+            // own cwd is `/` — context detection would walk the tree for
+            // nothing, so skip it for proxy processes.
+            let is_docker_proxy = process
+                .as_ref()
+                .is_some_and(|p| DockerProxyInfo::from_cmdline(&p.cmdline).is_some());
+
             let (project, framework) = match (&process, pid) {
-                (Some(p), Some(pid)) => {
+                (Some(p), Some(pid)) if !is_docker_proxy => {
                     let ctx_key = (pid, socket.port);
                     match seen_context.get(&ctx_key) {
                         Some(cached) => cached.clone(),

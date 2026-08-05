@@ -151,7 +151,11 @@ fn run() -> Result<i32> {
     let port = cli.port.or(cli.port_flag);
 
     if let Some(port) = cli.kill {
-        return kill_port(&mut engine, port, cli.force, cli.yes);
+        // `kill_confirm = false` in config.toml means "never ask" — the same
+        // setting the TUI honours. `--yes` remains the explicit per-invocation
+        // override; either one skips the prompt.
+        let skip_confirm = cli.yes || !config.kill_confirm;
+        return kill_port(&mut engine, port, cli.force, skip_confirm);
     }
     if cli.json {
         return print_json(&mut engine, port);
@@ -279,19 +283,40 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
     Ok(exit::OK)
 }
 
-fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i32> {
+fn kill_port(engine: &mut Engine, port: u16, force: bool, skip_confirm: bool) -> Result<i32> {
     // Fresh scan up front: both the confirmation text and the signal must
     // describe the process that owns the port *now*, not a seconds-old
     // snapshot. (CPU columns are irrelevant here, so a single scan suffices.)
-    let Some(service) = engine.service_on_port(port) else {
+    let snapshot = engine.scan();
+    let owners: Vec<&Service> = snapshot
+        .services
+        .iter()
+        .filter(|s| s.socket.port == port)
+        .collect();
+    let Some(service) = owners.first().copied() else {
         eprintln!("No service listening on port {port}");
         return Ok(exit::NO_MATCH);
     };
+    if owners.len() > 1 {
+        // Several processes share this port (SO_REUSEPORT workers, containers
+        // publishing the same port). A port query addresses the first owner;
+        // say so instead of pretending the port is unambiguous.
+        let pid = service
+            .process
+            .as_ref()
+            .map(|p| p.pid.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        eprintln!(
+            "note: {} services share port {port}; targeting pid {pid}",
+            owners.len()
+        );
+    }
 
     // The identity pin of the process the confirmation text described. With
-    // `--yes` no text was shown, so nobody was confirmed: whoever owns the
-    // port when the signal is sent is the target.
-    let expected = if yes {
+    // `--yes` (or `kill_confirm = false` in the config) no text was shown, so
+    // nobody was confirmed: whoever owns the port when the signal is sent is
+    // the target.
+    let expected = if skip_confirm {
         None
     } else {
         let pid = service
@@ -312,7 +337,7 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
             eprintln!("Cancelled.");
             return Ok(exit::OK);
         }
-        owner_pin(&service)
+        owner_pin(service)
     };
 
     let signal = if force { Signal::Kill } else { Signal::Term };
@@ -469,27 +494,32 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             }
         }
 
-        Effect::KillRequest(port, signal) => {
+        Effect::KillRequest(inode, signal) => {
             // Re-resolve from a fresh scan before showing the confirmation:
             // the snapshot the UI holds can be seconds old, and the modal must
-            // describe the process that owns the port *now*.
-            match engine.service_on_port(port) {
+            // describe the process that owns the socket *now*. The inode pins
+            // the exact row the user selected — another process on the same
+            // port (SO_REUSEPORT, containers) is not that row.
+            match engine.service_on_inode(inode) {
                 Some(service) => app.arm_kill(service, signal),
-                None => app.error = Some(format!("no service listening on port {port}")),
+                None => app.error = Some("the selected service is no longer listening".into()),
             }
         }
 
-        Effect::Kill(port, expected, signal) => {
-            // The snapshot the UI holds can be seconds old: a process may have
-            // exited and another bound the same port in that window. Re-resolve
-            // from a fresh scan so we signal the current owner, not a ghost.
-            match engine.service_on_port(port) {
+        Effect::Kill(inode, expected, signal) => {
+            // The snapshot the UI holds can be seconds old: the selected
+            // socket may have been closed (and its inode freed) in that
+            // window. Re-resolve from a fresh scan so we signal the process
+            // that owns the socket now, not a ghost.
+            match engine.service_on_inode(inode) {
                 Some(service) => {
                     // If the user confirmed a specific process in the modal,
-                    // only that process may be signalled. The port can be
-                    // re-bound while the modal is open, and killing the new
-                    // owner would kill a process the user never confirmed.
+                    // only that process may be signalled. The owner of a
+                    // socket can change while the modal is open (fd handoff,
+                    // fork), and signalling a different process would kill
+                    // something the user never confirmed.
                     if let Some(why) = confirmed_owner_mismatch(&service, expected) {
+                        let port = service.socket.port;
                         app.error = Some(format!(
                             "not killing: the owner of port {port} changed ({why})"
                         ));
