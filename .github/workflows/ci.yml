@@ -4,6 +4,8 @@ name: CI
 # automatically on push/PR. Trigger it manually from the Actions tab when a
 # full remote verification is wanted; locally the same commands are enforced
 # by `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test`.
+# Installing/updating the binary on a machine is a local operation handled by
+# scripts/install.sh — this pipeline only verifies, it never deploys.
 on:
   workflow_dispatch:
 

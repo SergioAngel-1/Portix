@@ -59,6 +59,27 @@ cargo build --release
 The binary is self-contained; copy `target/release/portix` anywhere on your
 `PATH`.
 
+### Update / reinstall
+
+Installing is a **local** operation — the CI pipeline only verifies the code,
+nothing deploys from GitHub. To update the binary on this machine, rebuild
+and overwrite it:
+
+```bash
+./scripts/install.sh                     # release build -> ~/.local/bin/portix
+./scripts/install.sh --sudo              # -> /usr/local/bin (prompts for password)
+./scripts/install.sh --bin-dir "$HOME/.cargo/bin"
+./scripts/install.sh --profile dev       # debug build (faster compile)
+BIN_DIR=/opt/portix ./scripts/install.sh # same settings as env vars
+```
+
+The script always overwrites the destination, so re-running it after a
+`git pull` is exactly "update portix". Equivalently, Cargo's own installer:
+
+```bash
+cargo install --path . --force           # -> ~/.cargo/bin/portix
+```
+
 ## Using the app (TUI)
 
 Just run it:
