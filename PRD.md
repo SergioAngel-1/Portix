@@ -1634,7 +1634,7 @@ Portix es una TUI, pero **un buen ciudadano de Unix** (JS-1 desde un script, y P
 - `o` (abrir en navegador), que ejecuta `xdg-open` con una URL de localhost.
 - La comprobación opcional de nuevas versiones, que **está desactivada por defecto y no se activará automáticamente en ninguna versión**.
 
-Esto se declara en el README y se verifica en CI: el job `no-network` de `.github/workflows/ci.yml` ejecuta Portix bajo `strace -f -e trace=network` contra el fixture y falla si aparece cualquier `connect()` a `AF_INET`/`AF_INET6`.
+Esto se declara en el README y se verifica en CI: el job `no-network` de `.github/workflows/ci.yml` ejecuta Portix bajo `strace -f -e trace=network` contra el fixture y falla si aparece cualquier `connect()` a `AF_INET`/`AF_INET6`. **Estado MVP:** el workflow es de disparo **manual** (`workflow_dispatch`) — el proyecto es local y no despliega nada en GitHub, así que nada se ejecuta automáticamente en push/PR.
 
 ### 13.2 Superficie de riesgo
 

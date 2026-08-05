@@ -1,9 +1,11 @@
 name: CI
 
+# Local project: nothing is deployed to GitHub, so this pipeline never fires
+# automatically on push/PR. Trigger it manually from the Actions tab when a
+# full remote verification is wanted; locally the same commands are enforced
+# by `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test`.
 on:
-  push:
-    branches: [master]
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
