@@ -19,6 +19,7 @@ cargo run -- 3000                 # what's on port 3000; exit 3 if nothing
 cargo run -- --no-color           # force the monochrome theme (also honors NO_COLOR)
 cargo run -- --proc-root tests/fixtures/proc/<name>   # run against a synthetic /proc
 ./scripts/install.sh              # build release + install to ~/.local/bin (re-run = update)
+./scripts/update-pkgbuild.sh      # regenerate packaging/aur/PKGBUILD from Cargo.toml (--check to verify)
 cargo test
 cargo test <name>                 # single test by substring, e.g. cargo test parse_ipv4
 cargo test -- --nocapture
@@ -27,9 +28,10 @@ cargo fmt
 ```
 
 Installing is a **local** operation: the CI pipeline (`.github/workflows/ci.yml`,
-manual trigger) only verifies — nothing deploys from GitHub. `scripts/install.sh`
-builds and overwrites the binary in place; re-running it after a `git pull`
-is how you update Portix on this machine.
+manual trigger, itself gitignored/local-only like `PRD.md`) only verifies —
+nothing deploys from GitHub. `scripts/install.sh` builds and overwrites the
+binary in place; re-running it after a `git pull` is how you update Portix on
+this machine.
 
 Tests live in `#[cfg(test)] mod tests` blocks inside the module they test (`platform/linux/net.rs`, `detect/scoring.rs`, `ui/format.rs`, `ui/theme.rs`, `core/config.rs`, …). `tests/fixtures/` is reserved for `/proc` trees and project trees driven through `--proc-root`; the top-level `benches/`, `fuzz/`, `detectors/`, `themes/` dirs are still empty placeholders for later phases (theming itself is live in `ui/theme.rs`, not the `themes/` dir; `ui/input.rs` and `ui/widgets/` are commented out in `ui/mod.rs`).
 

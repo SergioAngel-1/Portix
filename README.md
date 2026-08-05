@@ -43,10 +43,19 @@ ever. It reads `/proc`, and nothing else leaves your machine.
 
 ## Install
 
-### From the AUR (Arch, CachyOS, …)
+### As an Arch package (AUR-style PKGBUILD)
 
-No package is published yet — install from source below. (When a `portix-git`
-PKGBUILD exists, it will be linked here.)
+The PKGBUILD (`portix-git`, builds from the repo) is generated from
+`Cargo.toml` — the single source of truth — so version, description,
+license and URL can never drift:
+
+```bash
+./scripts/update-pkgbuild.sh             # (re)generate packaging/aur/PKGBUILD
+./scripts/update-pkgbuild.sh --check     # exit 1 if the PKGBUILD is stale
+cd packaging/aur && makepkg -si          # build + install the package locally
+```
+
+Not published to the AUR yet; when it is, `paru -S portix-git` will work.
 
 ### From source
 
@@ -65,8 +74,7 @@ The binary is self-contained; copy `target/release/portix` anywhere on your
 ### Update / reinstall
 
 Installing is a **local** operation — the CI pipeline only verifies the code,
-nothing deploys from GitHub. To update the binary on this machine, rebuild
-and overwrite it:
+nothing deploys from GitHub (the workflow file is itself local-only, like the PRD). To update the binary on this machine, rebuild and overwrite it:
 
 ```bash
 ./scripts/install.sh                     # release build -> ~/.local/bin/portix

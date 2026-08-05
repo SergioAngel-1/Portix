@@ -1,5 +1,13 @@
+# Rust build artifacts
 /target
-.mimocode/
 
-# PRD is the local working spec: never versioned, always present on this machine.
+# Local-only working files: never versioned, always present on this machine.
+# PRD.md is the working spec; .github/ holds the CI workflow (manual trigger,
+# this project does not deploy to GitHub). Clones will not contain either.
 /PRD.md
+/.github/
+
+# Editor / tooling noise
+.mimocode/
+*.swp
+.DS_Store
