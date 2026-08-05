@@ -74,12 +74,10 @@ pub fn rewrite_docker_proxy(service: &mut Service) {
         return;
     };
 
-    let container = Some(Container {
-        runtime: crate::model::Runtime::Docker,
-        id: info.container_ip.unwrap_or_else(|| "unknown".to_string()),
-        name: None,
-        compose_project: None,
-    });
+    let container = Some(Container::new(
+        crate::model::Runtime::Docker,
+        info.container_ip.unwrap_or_else(|| "unknown".to_string()),
+    ));
 
     service.container = container;
     service.project = None;

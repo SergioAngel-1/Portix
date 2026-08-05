@@ -1,5 +1,7 @@
 use crate::model::Signal;
 use anyhow::{anyhow, Result};
+use std::fs::File;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::Path;
 
 impl Signal {
@@ -16,13 +18,26 @@ impl Signal {
 ///
 /// PIDs are recycled. Between the snapshot the user is looking at and the
 /// keystroke that kills, the kernel may have handed this PID to something else.
-/// Re-reading `starttime` and comparing it against the value captured in the
-/// snapshot closes that TOCTOU window for the price of one file read.
+///
+/// The signal goes through a **pidfd** (`pidfd_open` + `pidfd_send_signal`,
+/// Linux ≥ 5.3): the fd pins the exact process that owns the PID at open time
+/// and keeps referring to it even if the PID is recycled before the signal
+/// lands — a recycled `kill(pid)` would hit the *new* owner, a
+/// `pidfd_send_signal` on a dead pin returns ESRCH instead. The identity check
+/// runs both before the open (cheap snapshot reject) and after it (against
+/// the *pinned* process: if the pin is a different or dead process, the
+/// `/proc` starttime read either mismatches or fails — refuse in both cases).
+///
+/// On kernels without `pidfd_open` (pre-5.3, ENOSYS/EINVAL) it falls back to
+/// the starttime re-check + `kill(2)` — the original microsecond window, and
+/// the best those kernels allow.
 ///
 /// We signal the process, never the process group: `kill(-pgid, …)` takes down
 /// every sibling sharing the group, which for a dev server launched from an
 /// interactive shell can include the shell itself.
 pub fn send_signal(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()> {
+    // Cheap snapshot check first: most mismatches are caught here without
+    // touching a syscall.
     let actual = super::proc::read_starttime_jiffies(proc_root, pid)
         .ok_or_else(|| anyhow!("process {pid} no longer exists"))?;
 
@@ -33,8 +48,79 @@ pub fn send_signal(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Sig
         ));
     }
 
-    // SAFETY: kill(2) with a positive pid and a valid signal number, on a pid we
-    // just verified to be the process we intend to signal.
+    // Pin the process. From here on the fd, not the PID, is the identity.
+    // SAFETY: pidfd_open(2) with a positive pid and flags=0; the fd is owned
+    // by the File we wrap it in immediately.
+    #[allow(unsafe_code)]
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            // Kernel without pidfd support: fall back to the re-check + kill.
+            Some(libc::ENOSYS) | Some(libc::EINVAL) => {
+                signal_via_kill(proc_root, pid, expected_starttime, sig)
+            }
+            // ESRCH and everything else: the process is gone.
+            _ => Err(err.into()),
+        };
+    }
+    // SAFETY: from_raw_fd takes ownership of the fd returned by pidfd_open;
+    // the File closes it on drop.
+    #[allow(unsafe_code)]
+    let pidfd = unsafe { File::from_raw_fd(fd as i32) };
+    // Re-verify identity against the *pinned* process. If the PID was
+    // recycled between the snapshot check and pidfd_open, the pin is the new
+    // process and /proc now shows it: mismatch, refuse. If the pinned process
+    // died meanwhile, the read fails or shows a recycled PID: mismatch, refuse.
+    let actual = super::proc::read_starttime_jiffies(proc_root, pid)
+        .ok_or_else(|| anyhow!("process {pid} no longer exists"))?;
+    if actual != expected_starttime {
+        return Err(anyhow!(
+            "refusing to signal PID {pid}: it was replaced by a different process \
+             (start time {actual} != {expected_starttime})"
+        ));
+    }
+
+    // SAFETY: pidfd_send_signal(2) on a live pidfd we own, with a valid signal
+    // and a NULL siginfo (default semantics, like kill). If the pinned process
+    // died after the check, this returns ESRCH — it can never reach a recycled
+    // PID's new owner.
+    #[allow(unsafe_code)]
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            sig.as_libc(),
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+/// The pre-pidfd path: re-read starttime immediately before `kill(2)`.
+///
+/// Only reached on kernels without `pidfd_open`. The re-read is the same
+/// TOCTOU guard as before, with the unavoidable microsecond window between
+/// the read and the syscall.
+fn signal_via_kill(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()> {
+    let actual = super::proc::read_starttime_jiffies(proc_root, pid)
+        .ok_or_else(|| anyhow!("process {pid} no longer exists"))?;
+
+    if actual != expected_starttime {
+        return Err(anyhow!(
+            "refusing to signal PID {pid}: it was replaced by a different process \
+             (start time {actual} != {expected_starttime})"
+        ));
+    }
+
+    // SAFETY: kill(2) with a positive pid and a valid signal number, on a pid
+    // we just verified to be the process we intend to signal.
     #[allow(unsafe_code)]
     let rc = unsafe { libc::kill(pid, sig.as_libc()) };
 
@@ -71,5 +157,51 @@ mod tests {
         let dir = fake_proc(4242, 111);
         let err = send_signal(dir.path(), 9999, 111, Signal::Term).unwrap_err();
         assert!(err.to_string().contains("no longer exists"));
+    }
+
+    /// The pidfd path against a real process: the pinned child must receive
+    /// the signal and die. Uses the real /proc — a synthetic root has no live
+    /// processes for pidfd_open to pin.
+    #[test]
+    fn test_pidfd_signals_a_real_child_process() {
+        use std::process::Command;
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let starttime = super::super::proc::read_starttime_jiffies(Path::new("/proc"), pid)
+            .expect("a live child must have a starttime");
+
+        send_signal(Path::new("/proc"), pid, starttime, Signal::Kill).unwrap();
+
+        let status = child.wait().unwrap();
+        assert!(
+            status.code().is_none(),
+            "child must die by signal, not by exit: {status:?}"
+        );
+    }
+
+    /// The identity check runs before any signalling syscall: a wrong
+    /// starttime on a real process must be refused without killing it.
+    #[test]
+    fn test_pidfd_refuses_wrong_starttime_on_a_real_process() {
+        use std::process::Command;
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+
+        // starttime 1 is impossible for a real process (the kernel itself
+        // takes more than one jiffy to boot), so this always mismatches.
+        let err = send_signal(Path::new("/proc"), pid, 1, Signal::Term).unwrap_err();
+        assert!(
+            err.to_string().contains("replaced by a different process"),
+            "unexpected error: {err}"
+        );
+
+        // The child must still be alive: the refusal happened before any
+        // signal was sent.
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "refused signal must not kill the child"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

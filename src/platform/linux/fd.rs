@@ -6,10 +6,17 @@ use std::path::Path;
 ///
 /// This is the critical optimization: instead of O(sockets × processes × fds),
 /// we do a single pass through all processes and build the reverse map.
+///
+/// No uid filter is applied — and none is needed: `/proc/<pid>/fd` is
+/// `dr-x------`, readable only by the process owner (and root), so a
+/// non-owner's fd table simply fails `read_dir` with EACCES and is skipped by
+/// the `if let Ok` below. That is what keeps sockets of other users
+/// unresolved (→ `Degradation::SocketsWithoutPid`) without the extra
+/// `/proc/<pid>/status` read per process the old ownership filter paid — one
+/// more read per pid per scan was doubling the status I/O on the hot path.
 pub fn build_inode_map(
     proc_root: &Path,
     interest_inodes: &HashSet<u64>,
-    current_uid: u32,
 ) -> Result<HashMap<u64, Vec<(i32, i32)>>> {
     let mut map: HashMap<u64, Vec<(i32, i32)>> = HashMap::new();
     let total_interest = interest_inodes.len();
@@ -18,11 +25,6 @@ pub fn build_inode_map(
     let pids = super::proc::list_pids(proc_root)?;
 
     for pid in pids {
-        // Optimization: skip processes not owned by us (unless root)
-        if current_uid != 0 && !is_process_owned_by(proc_root, pid, current_uid) {
-            continue;
-        }
-
         let fd_dir = proc_root.join(pid.to_string()).join("fd");
         if let Ok(entries) = std::fs::read_dir(&fd_dir) {
             for entry in entries.flatten() {
@@ -62,24 +64,6 @@ pub fn build_inode_map(
     Ok(map)
 }
 
-/// Check if a process is owned by a specific UID.
-fn is_process_owned_by(proc_root: &Path, pid: i32, uid: u32) -> bool {
-    let status_path = proc_root.join(pid.to_string()).join("status");
-    if let Ok(content) = std::fs::read_to_string(&status_path) {
-        for line in content.lines() {
-            if let Some(value) = line.strip_prefix("Uid:") {
-                // Format: "Uid:\t1000\t1000\t1000\t1000"
-                if let Some(first) = value.split_whitespace().next() {
-                    if let Ok(file_uid) = first.parse::<u32>() {
-                        return file_uid == uid;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,7 +91,7 @@ mod tests {
         let mut interest = HashSet::new();
         interest.insert(486312);
 
-        let map = build_inode_map(proc_root, &interest, 1000).unwrap();
+        let map = build_inode_map(proc_root, &interest).unwrap();
         assert!(map.contains_key(&486312));
         assert_eq!(map[&486312][0].0, 1234);
     }
@@ -134,7 +118,7 @@ mod tests {
         }
 
         let interest = HashSet::from([100, 200]);
-        let map = build_inode_map(proc_root, &interest, 1000).unwrap();
+        let map = build_inode_map(proc_root, &interest).unwrap();
 
         assert!(map.contains_key(&100), "inode 100 missing");
         assert!(map.contains_key(&200), "scan stopped before reaching pid 2");

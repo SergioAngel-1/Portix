@@ -54,22 +54,20 @@ fn conventional_port(port: u16) -> Option<&'static str> {
     }
 }
 
-/// Resolve the version of a detected framework from manifest dependencies.
-fn resolve_version(root: Option<&Path>, framework_id: &str) -> Option<String> {
-    let root = root?;
-    let content = crate::detect::project::read_manifest(&root.join("package.json"))?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+/// Resolve the version of a detected framework from the dependency map
+/// already parsed by [`DetectorRegistry::collect_signals`].
+fn resolve_version(
+    deps: Option<&serde_json::Map<String, serde_json::Value>>,
+    framework_id: &str,
+) -> Option<String> {
+    let deps = deps?;
 
     let dep_key = NODE_DEPENDENCIES
         .iter()
         .find(|(id, _)| *id == framework_id)
         .map(|(_, key)| *key)?;
 
-    // Check both dependencies and devDependencies
-    let value = json
-        .get("dependencies")
-        .and_then(|d| d.get(dep_key))
-        .or_else(|| json.get("devDependencies").and_then(|d| d.get(dep_key)))?;
+    let value = deps.get(dep_key)?;
 
     let version_str = value.as_str()?;
     // Strip semver prefix (^ ~ >=) for display
@@ -194,7 +192,10 @@ impl DetectorRegistry {
         cmdline: &[String],
         port: u16,
     ) -> Option<Framework> {
-        let signals = self.collect_signals(cwd, exe, cmdline, port);
+        // `collect_signals` returns the parsed dependency map it already read,
+        // so `resolve_version` never re-reads and re-parses package.json — the
+        // manifest is parsed once per detection, not twice.
+        let (signals, deps) = self.collect_signals(cwd, exe, cmdline, port);
         let scores = crate::detect::scoring::score_signals(&signals);
 
         // Iterating a HashMap is not deterministic, so ties must be broken by
@@ -224,7 +225,7 @@ impl DetectorRegistry {
         let confidence = crate::detect::scoring::score_to_confidence(
             scores.get(display_id).copied().unwrap_or(best_score),
         );
-        let version = resolve_version(cwd, display_id);
+        let version = resolve_version(deps.as_ref(), display_id);
         let name = framework_display_name(display_id);
         // Implies relations (fastapi → uvicorn, gunicorn → wsgi) render as a
         // suffix: the implied framework is a true fact about the stack, so it
@@ -260,13 +261,19 @@ impl DetectorRegistry {
     }
 
     /// Collect all signals from various sources.
+    ///
+    /// Returns the parsed dependency map alongside the signals, so version
+    /// resolution can reuse it instead of reading `package.json` again.
     fn collect_signals(
         &self,
         root: Option<&Path>,
         exe: Option<&Path>,
         cmdline: &[String],
         port: u16,
-    ) -> Vec<Signal> {
+    ) -> (
+        Vec<Signal>,
+        Option<serde_json::Map<String, serde_json::Value>>,
+    ) {
         let mut signals = Vec::new();
         let cmdline_str = cmdline.join(" ");
 
@@ -346,7 +353,7 @@ impl DetectorRegistry {
         }
 
         let Some(root) = root else {
-            return signals;
+            return (signals, None);
         };
 
         for (id, files) in PROJECT_FILES {
@@ -371,7 +378,10 @@ impl DetectorRegistry {
         }
 
         // A declared dependency is the strongest evidence short of the binary.
-        if let Some(deps) = read_dependencies(root) {
+        // The parsed map rides along so `resolve_version` does not read the
+        // manifest a second time.
+        let deps = read_dependencies(root);
+        if let Some(deps) = deps.as_ref() {
             for (id, dep) in NODE_DEPENDENCIES {
                 if deps.get(*dep).is_some() {
                     signals.push(Signal::new(*id, kinds::MANIFEST_DEP, format!("dep:{dep}")));
@@ -390,7 +400,7 @@ impl DetectorRegistry {
             }
         }
 
-        signals
+        (signals, deps)
     }
 
     /// Resolve supersedes relationships.

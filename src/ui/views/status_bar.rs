@@ -151,15 +151,18 @@ fn visible_hints(area_width: usize, right_width: usize) -> Vec<usize> {
 }
 
 /// Display width of a set of hints, separators included — no styling, so the
-/// fitting logic stays independent of the theme.
+/// fitting logic stays independent of the theme. Counts terminal columns via
+/// `unicode-width` (same convention as [`spans_width`]), so a wide-glyph key
+/// or label does not silently throw the fitting off.
 fn hint_width(indices: &[usize]) -> usize {
+    use unicode_width::UnicodeWidthStr;
     let mut width = 0;
     for (i, &idx) in indices.iter().enumerate() {
         if i > 0 {
-            width += SEP.chars().count();
+            width += SEP.width();
         }
         let (key, label) = HINTS[idx];
-        width += key.chars().count() + 1 + label.chars().count();
+        width += key.width() + 1 + label.width();
     }
     width
 }

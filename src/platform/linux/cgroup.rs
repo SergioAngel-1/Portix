@@ -45,12 +45,7 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
     // Docker v2 (systemd): docker-<64hex>.scope
     if let Some(rest) = path.strip_prefix("system.slice/docker-") {
         if let Some(id) = rest.strip_suffix(".scope").filter(|id| is_hex_id(id)) {
-            return Some(Container {
-                runtime: Runtime::Docker,
-                id: id.to_string(),
-                name: None,
-                compose_project: None,
-            });
+            return Some(Container::new(Runtime::Docker, id.to_string()));
         }
     }
 
@@ -58,12 +53,7 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
     if let Some(rest) = path.strip_prefix("docker/") {
         let id = rest.trim_end_matches('/');
         if is_hex_id(id) {
-            return Some(Container {
-                runtime: Runtime::Docker,
-                id: id.to_string(),
-                name: None,
-                compose_project: None,
-            });
+            return Some(Container::new(Runtime::Docker, id.to_string()));
         }
     }
 
@@ -71,12 +61,7 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
     if let Some(rest) = path.strip_prefix("libpod/") {
         let id = rest.trim_end_matches('/');
         if is_hex_id(id) {
-            return Some(Container {
-                runtime: Runtime::Podman,
-                id: id.to_string(),
-                name: None,
-                compose_project: None,
-            });
+            return Some(Container::new(Runtime::Podman, id.to_string()));
         }
     }
 
@@ -84,12 +69,7 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
     if let Some(rest) = path.strip_prefix("cri-containerd/") {
         let id = rest.trim_end_matches('/');
         if is_hex_id(id) {
-            return Some(Container {
-                runtime: Runtime::Containerd,
-                id: id.to_string(),
-                name: None,
-                compose_project: None,
-            });
+            return Some(Container::new(Runtime::Containerd, id.to_string()));
         }
     }
 
@@ -103,36 +83,21 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
             .and_then(|r| r.strip_suffix(".scope"))
             .filter(|id| is_hex_id(id))
         {
-            return Some(Container {
-                runtime: Runtime::Docker,
-                id: id.to_string(),
-                name: None,
-                compose_project: None,
-            });
+            return Some(Container::new(Runtime::Docker, id.to_string()));
         }
         if let Some(id) = leaf
             .strip_prefix("libpod-")
             .and_then(|r| r.strip_suffix(".scope"))
             .filter(|id| is_hex_id(id))
         {
-            return Some(Container {
-                runtime: Runtime::Podman,
-                id: id.to_string(),
-                name: None,
-                compose_project: None,
-            });
+            return Some(Container::new(Runtime::Podman, id.to_string()));
         }
         if let Some(id) = leaf
             .strip_prefix("cri-containerd-")
             .and_then(|r| r.strip_suffix(".scope"))
             .filter(|id| is_hex_id(id))
         {
-            return Some(Container {
-                runtime: Runtime::Containerd,
-                id: id.to_string(),
-                name: None,
-                compose_project: None,
-            });
+            return Some(Container::new(Runtime::Containerd, id.to_string()));
         }
         // systemd-nspawn: machine-<name>.scope under machine.slice. Machine
         // names are arbitrary (no hex guard), but restricted to the
@@ -143,12 +108,7 @@ fn parse_cgroup_path(path: &str) -> Option<Container> {
                 .and_then(|r| r.strip_suffix(".scope"))
                 .filter(|id| !id.is_empty())
             {
-                return Some(Container {
-                    runtime: Runtime::SystemdNspawn,
-                    id: id.to_string(),
-                    name: None,
-                    compose_project: None,
-                });
+                return Some(Container::new(Runtime::SystemdNspawn, id.to_string()));
             }
         }
     }

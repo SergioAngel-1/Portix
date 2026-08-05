@@ -118,10 +118,12 @@ You get a live, auto-refreshing table. Move around and act with single keys:
 | `?`            | Help                                     |
 | `q`            | Quit                                     |
 
-Killing asks for confirmation first, and re-checks the process identity the
-instant before signaling — so a PID that got recycled between the list and your
-keypress is never the one that gets killed, and a port that changed owners while
-you were deciding is refused instead of killing the new process.
+Killing asks for confirmation first, and the signal goes through a pidfd that
+pins the exact process you confirmed — so a PID recycled between the list and
+your keypress is never the one that gets killed, and a port whose owner changed
+while you were deciding is refused instead of killing the new process. When
+several processes share one port (SO_REUSEPORT workers, containers), the
+confirmation shows the exact row you selected, never a sibling.
 
 When a scan is degraded (unreadable processes, sockets without an owner,
 container ports that may be hidden), the footer shows a `⚠N` count; `?` unfolds

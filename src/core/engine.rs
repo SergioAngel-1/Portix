@@ -21,7 +21,6 @@ pub struct Engine {
     cache: CacheStore,
     registry: DetectorRegistry,
     config: Config,
-    current_uid: u32,
     num_cpus: usize,
     /// Last container-warning result, recomputed at most once per 10 s: the
     /// heuristic walks all of `/proc` (cgroup + cmdline of every pid) and is
@@ -36,15 +35,14 @@ impl Engine {
     /// Linux backend, so callers get an `Engine` straight away.
     pub fn new(proc_root: Option<&Path>, config: Config) -> Self {
         let platform = Box::new(LinuxProbe::new(proc_root));
-        let current_uid = platform.current_uid();
+        let num_cpus = platform.num_cpus();
 
         Self {
             platform,
             cache: CacheStore::new(),
             registry: DetectorRegistry::new(),
             config,
-            current_uid,
-            num_cpus: crate::platform::linux::metrics::get_num_cpus(),
+            num_cpus,
             container_warning: None,
         }
     }
@@ -103,12 +101,7 @@ impl Engine {
             .collect();
 
         let interest: HashSet<u64> = sockets.iter().map(|s| s.inode).collect();
-        let inode_map = crate::platform::linux::fd::build_inode_map(
-            self.platform.proc_root(),
-            &interest,
-            self.current_uid,
-        )
-        .unwrap_or_default();
+        let inode_map = self.platform.build_inode_map(&interest).unwrap_or_default();
 
         let total_jiffies = self.platform.total_jiffies();
         let mut live = HashSet::new();
@@ -295,7 +288,7 @@ impl Engine {
             process.user = match self.cache.get_user(uid) {
                 Some(name) => Some(name.clone()),
                 None => {
-                    let name = crate::platform::linux::proc::uid_to_username(uid);
+                    let name = self.platform.username_for_uid(uid);
                     if let Some(ref n) = name {
                         self.cache.insert_user(uid, n.clone());
                     }
@@ -563,6 +556,38 @@ mod tests {
         assert_eq!(merged.len(), 2);
     }
 
+    /// The v6 socket may be listed before the v4 in `/proc/net/*` — order
+    /// must not matter: the pair still collapses into one dual-stack row.
+    #[test]
+    fn test_dual_stack_merges_regardless_of_order() {
+        let merged = merge_dual_stack(vec![
+            service(Protocol::Tcp6, 3000, Some(1)),
+            service(Protocol::Tcp, 3000, Some(1)),
+        ]);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].socket.dual_stack);
+        assert!(merged[0].socket.protocol.is_v6());
+    }
+
+    /// v4 + v6 + another v4 on the same port: the v4+v6 pair collapses, and
+    /// the second v4 (a distinct listener, e.g. 127.0.0.1 beside 0.0.0.0)
+    /// keeps its own row.
+    #[test]
+    fn test_third_same_port_socket_stays_separate() {
+        let merged = merge_dual_stack(vec![
+            service(Protocol::Tcp, 3000, Some(1)),
+            service(Protocol::Tcp6, 3000, Some(1)),
+            service(Protocol::Tcp, 3000, Some(1)),
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        let dual = merged.iter().filter(|s| s.socket.dual_stack).count();
+        assert_eq!(dual, 1, "exactly one row is the merged pair");
+        let v6 = merged.iter().filter(|s| s.socket.protocol.is_v6()).count();
+        assert_eq!(v6, 1, "the merged pair's survivor is the v6 socket");
+    }
+
     /// Two sockets of the same IP version on one port and pid are distinct
     /// listeners (SO_REUSEPORT, or 127.0.0.1 + 0.0.0.0 in one process). The
     /// merge exists for v4+v6 dual-stack pairs only.
@@ -573,5 +598,47 @@ mod tests {
             service(Protocol::Tcp, 3000, Some(1)),
         ]);
         assert_eq!(merged.len(), 2);
+    }
+
+    fn engine_with(config: Config) -> Engine {
+        Engine::new(Some(tempfile::tempdir().unwrap().path()), config)
+    }
+
+    #[test]
+    fn test_filters_hide_udp_sockets_when_disabled() {
+        let engine = engine_with(Config {
+            show_udp: false,
+            ..Config::default()
+        });
+        assert!(!engine.socket_passes_filters(&socket(Protocol::Udp, 5353, 1)));
+        assert!(engine.socket_passes_filters(&socket(Protocol::Tcp, 5353, 2)));
+    }
+
+    #[test]
+    fn test_filters_hide_system_ports_unless_requested() {
+        let engine = engine_with(Config::default()); // show_system_ports = false
+        assert!(!engine.socket_passes_filters(&socket(Protocol::Tcp, 80, 1)));
+        assert!(engine.socket_passes_filters(&socket(Protocol::Tcp, 8080, 2)));
+
+        let engine = engine_with(Config {
+            show_system_ports: true,
+            ..Config::default()
+        });
+        assert!(engine.socket_passes_filters(&socket(Protocol::Tcp, 80, 3)));
+    }
+
+    #[test]
+    fn test_loopback_only_filters_non_loopback_binds() {
+        let engine = engine_with(Config {
+            show_loopback_only: true,
+            ..Config::default()
+        });
+        // The helper socket binds AllInterfaces: filtered out.
+        assert!(!engine.socket_passes_filters(&socket(Protocol::Tcp, 3000, 1)));
+
+        let mut loopback = socket(Protocol::Tcp, 3000, 2);
+        loopback.local_addr = std::net::Ipv4Addr::LOCALHOST.into();
+        loopback.bind_scope = crate::model::BindScope::Loopback;
+        assert!(engine.socket_passes_filters(&loopback));
     }
 }

@@ -133,6 +133,11 @@ impl Config {
 
     /// Same as [`save_theme`], but writes to an explicit path. Split out so
     /// tests can exercise the write without touching the real XDG config.
+    ///
+    /// The write is atomic: content goes to a sibling temp file which is
+    /// renamed over the target. A crash mid-write can no longer leave a
+    /// truncated `config.toml` that silently resets every setting on the next
+    /// load.
     fn save_theme_to(&self, path: PathBuf) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -142,7 +147,16 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e),
         };
-        std::fs::write(&path, upsert_theme_line(&existing, &self.theme))
+        let content = upsert_theme_line(&existing, &self.theme);
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, content)?;
+        match std::fs::rename(&tmp, &path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 }
 
@@ -216,6 +230,11 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "theme = \"mono\"\n");
+        // The atomic rename must not leave the temp file behind.
+        assert!(
+            !path.with_extension("toml.tmp").exists(),
+            "temp file must be renamed away"
+        );
     }
 
     /// An existing-but-unreadable file must propagate the error, never be

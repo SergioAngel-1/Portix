@@ -13,6 +13,10 @@
 ///   otherwise render backwards through the chokepoint (`exe.live` looking
 ///   like `evil.exe`), and zero-width joiners can hide or merge glyphs.
 ///
+/// Note: this primitive deliberately *preserves* `\n` and `\t`. It is **not**
+/// by itself a safe cell formatter — use [`cell`], which additionally flattens
+/// newlines, for anything drawn inside a table cell or a single line.
+///
 /// See §13.2 in PRD for security details.
 pub fn sanitize_for_terminal(text: &str) -> String {
     text.chars()
@@ -67,8 +71,11 @@ fn is_unsafe_format(c: char) -> bool {
 
 /// The one way system-derived text is allowed to reach the screen.
 ///
+/// **This — not `sanitize_for_terminal` — is the mandatory chokepoint.**
 /// Sanitizes, then guarantees the result is a single line. Any `String` built
-/// from `cmdline`, `comm`, or a project name must pass through here.
+/// from `cmdline`, `comm`, or a project name must pass through here; a view
+/// that calls `sanitize_for_terminal` directly would let `\n` split a table
+/// cell into injected rows.
 pub fn cell(text: &str) -> String {
     sanitize_for_terminal(text).replace('\n', " ")
 }
@@ -102,15 +109,7 @@ pub fn format_uptime(d: std::time::Duration) -> String {
 
 /// Format bytes in human-readable form.
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} K", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} M", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    format_bytes_compact(bytes)
 }
 
 /// Truncate a string from the center, keeping the head and tail.
@@ -226,9 +225,10 @@ mod tests {
 
     #[test]
     fn test_format_bytes() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(1023), "1023 B");
-        assert_eq!(format_bytes(1024), "1.0 K");
-        assert_eq!(format_bytes(1024 * 1024), "1.0 M");
+        assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(1023), "1023B");
+        assert_eq!(format_bytes(1024), "1K");
+        assert_eq!(format_bytes(1024 * 1024), "1M");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0G");
     }
 }

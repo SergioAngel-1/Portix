@@ -233,4 +233,21 @@ mod tests {
         let socket = parse_proc_net_line(line, Protocol::Udp).unwrap();
         assert!(!is_serving(&socket, line, Protocol::Udp));
     }
+
+    #[test]
+    fn test_bound_udp6_socket_is_serving() {
+        // IPv6 form of the bound-no-peer case: the remote address is 32 hex
+        // zeros and the remote port is zero.
+        let line = "   0: 00000000000000000000000000000000:14E9 00000000000000000000000000000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 486312 2 0000 0";
+        let socket = parse_proc_net_line(line, Protocol::Udp6).unwrap();
+        assert!(is_serving(&socket, line, Protocol::Udp6));
+    }
+
+    #[test]
+    fn test_connected_udp6_socket_is_not_serving() {
+        // Remote address non-zero: an outbound UDP6 socket, not a service.
+        let line = "   0: 00000000000000000000000000000000:C1A3 0000000000000000000000000800080A:0035 07 00000000:00000000 00:00000000 00000000  1000        0 486313 2 0000 0";
+        let socket = parse_proc_net_line(line, Protocol::Udp6).unwrap();
+        assert!(!is_serving(&socket, line, Protocol::Udp6));
+    }
 }

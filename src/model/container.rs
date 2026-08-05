@@ -44,6 +44,17 @@ pub struct Container {
 }
 
 impl Container {
+    /// A container with no name or compose project yet (the Docker API that
+    /// could provide them is only consulted in v1.5).
+    pub fn new(runtime: Runtime, id: String) -> Self {
+        Self {
+            runtime,
+            id,
+            name: None,
+            compose_project: None,
+        }
+    }
+
     /// Get display string for the container column.
     pub fn display(&self) -> String {
         match &self.name {

@@ -700,4 +700,54 @@ mod tests {
         svc.process = None;
         assert!(confirmed_owner_mismatch(&svc, Some((10, 5))).is_some());
     }
+
+    /// `--kill` on a port with no listener exits NO_MATCH without prompting.
+    #[test]
+    fn test_kill_port_no_service_returns_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = &mut Engine::new(Some(dir.path()), Config::default());
+        let code = kill_port(engine, 39999, false, true).unwrap();
+        assert_eq!(code, exit::NO_MATCH);
+    }
+
+    /// `--kill` on a fixture service runs the full path up to the signal,
+    /// which fails deterministically on a synthetic pid: a pid beyond pid_max
+    /// can never be pinned by pidfd_open nor hit by kill(2), so the test can
+    /// never signal a real process.
+    #[test]
+    fn test_kill_port_reaches_signal_and_fails_on_synthetic_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // 9_000_000 > pid_max (default 4194304): pidfd_open rejects it with
+        // EINVAL and kill(2) with ESRCH — the signal step fails safely.
+        let pid: i32 = 9_000_000;
+        std::fs::write(root.join("stat"), "cpu  1 2 3 4\nbtime 1700000000\n").unwrap();
+        std::fs::create_dir_all(root.join("net")).unwrap();
+        std::fs::write(
+            root.join("net/tcp"),
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 777001 1 0000 100 0 0 10 0\n",
+        )
+        .unwrap();
+        let pdir = root.join(pid.to_string());
+        std::fs::create_dir_all(pdir.join("fd")).unwrap();
+        std::fs::write(
+            pdir.join("stat"),
+            format!("{pid} (svc) S 1 1 1 0 -1 0 0 0 0 0 10 20 0 0 20 0 1 0 12345 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"),
+        )
+        .unwrap();
+        std::fs::write(
+            pdir.join("status"),
+            "Name:\tsvc\nUid:\t1000\t1000\t1000\t1000\nVmRSS:\t1024 kB\nThreads:\t1\n",
+        )
+        .unwrap();
+        std::fs::write(pdir.join("cmdline"), b"node\x00server.js\x00").unwrap();
+        std::os::unix::fs::symlink("socket:[777001]", pdir.join("fd/3")).unwrap();
+
+        let engine = &mut Engine::new(Some(root), Config::default());
+        let err = kill_port(engine, 8080, false, true).unwrap_err();
+        assert!(
+            err.to_string().contains("process"),
+            "the signal step must fail on the synthetic pid: {err}"
+        );
+    }
 }

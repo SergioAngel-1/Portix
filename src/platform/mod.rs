@@ -38,6 +38,20 @@ pub trait PlatformProbe {
     /// System-wide CPU jiffies, for computing per-process CPU shares.
     fn total_jiffies(&self) -> Option<u64>;
 
+    /// Build the socket-inode → (pid, fd) reverse map for the inodes of
+    /// interest, by walking every process's fd table. Processes whose fd
+    /// tables are unreadable (other users, hidepid) simply never appear.
+    fn build_inode_map(
+        &self,
+        interest: &std::collections::HashSet<u64>,
+    ) -> Result<std::collections::HashMap<u64, Vec<(i32, i32)>>>;
+
+    /// Number of CPU cores, for scaling CPU percentages.
+    fn num_cpus(&self) -> usize;
+
+    /// Resolve a numeric UID to a username via NSS (`getpwuid_r`), if any.
+    fn username_for_uid(&self, uid: u32) -> Option<String>;
+
     /// Get the root path for /proc (or equivalent).
     fn proc_root(&self) -> &Path;
 }
@@ -87,6 +101,21 @@ impl PlatformProbe for LinuxProbe {
 
     fn total_jiffies(&self) -> Option<u64> {
         linux::metrics::get_total_jiffies(&self.proc_root)
+    }
+
+    fn build_inode_map(
+        &self,
+        interest: &std::collections::HashSet<u64>,
+    ) -> Result<std::collections::HashMap<u64, Vec<(i32, i32)>>> {
+        linux::fd::build_inode_map(&self.proc_root, interest)
+    }
+
+    fn num_cpus(&self) -> usize {
+        linux::metrics::get_num_cpus()
+    }
+
+    fn username_for_uid(&self, uid: u32) -> Option<String> {
+        linux::proc::uid_to_username(uid)
     }
 
     fn proc_root(&self) -> &Path {
