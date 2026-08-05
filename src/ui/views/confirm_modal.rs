@@ -2,7 +2,7 @@ use crate::model::{Service, Signal};
 use crate::ui::format::cell;
 use crate::ui::theme::Theme;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -15,7 +15,7 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, signal: Sign
         return;
     };
 
-    let area = centered_rect(56, 9, area);
+    let area = super::centered_fixed(56, 9, area);
 
     let (verb, color) = match signal {
         Signal::Kill => ("Force kill (SIGKILL)", theme.danger),
@@ -57,25 +57,4 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, signal: Sign
             .alignment(Alignment::Left),
         area,
     );
-}
-
-/// A rect of the given size, centered in `r`.
-fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(r.height.saturating_sub(height) / 2),
-            Constraint::Length(height.min(r.height)),
-            Constraint::Min(0),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(r.width.saturating_sub(width) / 2),
-            Constraint::Length(width.min(r.width)),
-            Constraint::Min(0),
-        ])
-        .split(vertical[1])[1]
 }

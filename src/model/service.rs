@@ -70,9 +70,4 @@ impl Service {
             None => "—".to_string(),
         }
     }
-
-    /// Start time of the owning process, for TOCTOU-safe signalling.
-    pub fn starttime(&self) -> Option<u64> {
-        self.process.as_ref().map(|p| p.starttime_jiffies)
-    }
 }

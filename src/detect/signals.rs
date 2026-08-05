@@ -26,9 +26,7 @@ pub mod kinds {
     pub const CMDLINE_ARG: f64 = 0.7;
     pub const CMDLINE_SCRIPT_PATH: f64 = 0.85;
     pub const CMDLINE_MODULE: f64 = 0.9;
-    pub const ENV_VAR: f64 = 0.9;
     pub const MANIFEST_DEP: f64 = 0.9;
     pub const PROJECT_FILE: f64 = 0.7;
-    pub const LOCKFILE: f64 = 0.5;
     pub const PORT_CONVENTION: f64 = 0.1; // Never decides alone
 }

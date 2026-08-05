@@ -52,8 +52,9 @@ pub fn build_inode_map(
         // Stop once every inode we care about has an owner. Count distinct
         // inodes, not hits: one socket can be held by several fds (dup, forked
         // workers under SO_REUSEPORT), and counting hits stops the scan early
-        // with inodes still unresolved.
-        if map.len() >= total_interest {
+        // with inodes still unresolved. An empty interest set means there is
+        // nothing to resolve, so the whole walk is pointless.
+        if !interest_inodes.is_empty() && map.len() >= total_interest {
             break;
         }
     }

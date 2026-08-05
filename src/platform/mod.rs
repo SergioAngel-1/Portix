@@ -16,9 +16,6 @@ pub trait PlatformProbe {
     /// List all listening sockets on the system.
     fn list_listening_sockets(&self) -> Result<Vec<Socket>>;
 
-    /// List all PIDs visible to the current user.
-    fn list_pids(&self) -> Result<Vec<i32>>;
-
     /// Get metadata for a specific process.
     fn process_metadata(&self, pid: i32) -> Result<Process>;
 
@@ -63,10 +60,6 @@ impl LinuxProbe {
 impl PlatformProbe for LinuxProbe {
     fn list_listening_sockets(&self) -> Result<Vec<Socket>> {
         linux::net::list_listening_sockets(&self.proc_root)
-    }
-
-    fn list_pids(&self) -> Result<Vec<i32>> {
-        linux::proc::list_pids(&self.proc_root)
     }
 
     fn process_metadata(&self, pid: i32) -> Result<Process> {

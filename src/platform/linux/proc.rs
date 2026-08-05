@@ -237,7 +237,28 @@ fn read_stat(proc_root: &Path, pid_dir: &Path) -> Option<StatInfo> {
 }
 
 /// Boot time in epoch seconds, from the `btime` line of <proc_root>/stat.
+///
+/// `btime` is constant until reboot, but `read_stat` runs once per process per
+/// scan — reading the whole `/proc/stat` every time is hundreds of extra file
+/// reads with no information gain. Cached per proc root (single entry: one
+/// scan uses one root, and tests use unique temp dirs, so entries never
+/// collide).
 fn boot_time_secs(proc_root: &Path) -> Option<u64> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(PathBuf, Option<u64>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((root, btime)) = cache.as_ref() {
+        if root == proc_root {
+            return *btime;
+        }
+    }
+    let btime = read_btime(proc_root);
+    *cache = Some((proc_root.to_path_buf(), btime));
+    btime
+}
+
+/// Read the `btime` line of <proc_root>/stat, uncached.
+fn read_btime(proc_root: &Path) -> Option<u64> {
     let content = std::fs::read_to_string(proc_root.join("stat")).ok()?;
     content
         .lines()
@@ -297,6 +318,46 @@ pub(crate) fn uid_to_username(uid: u32) -> Option<String> {
     name.to_str().ok().map(|s| s.to_string())
 }
 
+/// Home directory of another user, resolved via the POSIX `getpwnam_r` API.
+///
+/// Used by config loading under `sudo portix` (PRD §13.3): sudo resets
+/// `$HOME` to the root user's, so the invoking user's config would otherwise
+/// be ignored — and a theme save would land in `/root/.config`. `platform`
+/// exposes the primitive; `core` decides when to consult it.
+pub(crate) fn home_dir_for_user(name: &str) -> Option<PathBuf> {
+    let buf_size = 4096;
+    let mut buf = vec![0u8; buf_size];
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let c_name = std::ffi::CString::new(name).ok()?;
+
+    #[allow(unsafe_code)]
+    let rc = unsafe {
+        libc::getpwnam_r(
+            c_name.as_ptr(),
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr() as *mut i8,
+            buf_size,
+            &mut result,
+        )
+    };
+
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+
+    #[allow(unsafe_code)]
+    let pw = unsafe { &*result };
+
+    if pw.pw_dir.is_null() {
+        return None;
+    }
+
+    #[allow(unsafe_code)]
+    let dir = unsafe { CStr::from_ptr(pw.pw_dir) };
+    dir.to_str().ok().map(PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +408,16 @@ mod tests {
         let dir = fake_proc(12345, HOSTILE_COMM_STAT);
         assert_eq!(read_starttime_jiffies(dir.path(), 12345), Some(987654));
         assert_eq!(read_starttime_jiffies(dir.path(), 999), None);
+    }
+
+    /// `root` always exists with a home; a made-up user must not resolve.
+    /// These are local passwd lookups, so no LDAP/NIS latency in tests.
+    #[test]
+    fn test_home_dir_for_user_resolves_real_users_only() {
+        assert!(
+            home_dir_for_user("root").is_some(),
+            "root must resolve to a home directory"
+        );
+        assert_eq!(home_dir_for_user("no-such-user-portix-test"), None);
     }
 }

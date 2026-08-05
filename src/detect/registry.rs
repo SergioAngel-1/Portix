@@ -97,6 +97,19 @@ fn is_asgi_app_target(arg: &str) -> bool {
     is_ident(module, true) && is_ident(attr, false)
 }
 
+/// Is `arg` the given program name, with or without a path prefix?
+///
+/// `flask` and `/usr/bin/flask` both match, as does the `flask` of
+/// `python -m flask`. `flask-cors`, `/srv/flask_app/x.py` and
+/// `--config gunicorn.conf.py` do not — the old substring matching fired on
+/// all of those (a path or package name containing the word is not the
+/// binary). The JS detectors were hardened the same way (`node_modules/.bin`).
+fn arg_is_program(arg: &str, name: &str) -> bool {
+    std::path::Path::new(arg)
+        .file_name()
+        .is_some_and(|f| f == name)
+}
+
 /// Does `root/app.py` exist and construct a Flask app (`Flask(`)?
 ///
 /// Bounded by `read_manifest` (1 MiB cap, regular-file requirement): a
@@ -205,7 +218,12 @@ impl DetectorRegistry {
             .filter(|s| s.framework_id == display_id)
             .collect();
 
-        let confidence = crate::detect::scoring::score_to_confidence(best_score);
+        // Confidence belongs to the framework that is *shown*: when a
+        // supersede fires (react 0.9 → nextjs 0.85), the score of the
+        // superseded best is not the score of the displayed framework.
+        let confidence = crate::detect::scoring::score_to_confidence(
+            scores.get(display_id).copied().unwrap_or(best_score),
+        );
         let version = resolve_version(cwd, display_id);
         let name = framework_display_name(display_id);
         // Implies relations (fastapi → uvicorn, gunicorn → wsgi) render as a
@@ -285,7 +303,7 @@ impl DetectorRegistry {
             }
         }
 
-        if cmdline_str.contains("-m uvicorn") || cmdline_str.contains("uvicorn ") {
+        if cmdline.iter().any(|a| arg_is_program(a, "uvicorn")) {
             // `uvicorn app:app` — an ASGI app target — is the canonical FastAPI
             // dev command. A bare uvicorn with no target is the weaker fallback.
             if cmdline.iter().any(|arg| is_asgi_app_target(arg)) {
@@ -302,21 +320,28 @@ impl DetectorRegistry {
                 ));
             }
         }
-        if cmdline_str.contains("gunicorn") {
+        // Token match, not substring: `gunicorn --config x.conf` fires, but a
+        // path like `/srv/gunicorn_launcher/start.py` no longer does.
+        if cmdline.iter().any(|a| arg_is_program(a, "gunicorn")) {
             signals.push(Signal::new(
                 "gunicorn",
                 kinds::CMDLINE_BINARY,
                 "cmdline:gunicorn",
             ));
         }
-        if cmdline_str.contains("manage.py") && cmdline_str.contains("runserver") {
+        if cmdline.iter().any(|a| arg_is_program(a, "manage.py"))
+            && cmdline
+                .iter()
+                .any(|a| a == "runserver" || a.starts_with("runserver"))
+        {
+            // `manage.py runserver` and django-extensions' `runserver_plus`.
             signals.push(Signal::new(
                 "django",
                 kinds::CMDLINE_ARG,
                 "cmdline:manage.py runserver",
             ));
         }
-        if cmdline_str.contains("flask") {
+        if cmdline.iter().any(|a| arg_is_program(a, "flask")) {
             signals.push(Signal::new("flask", kinds::CMDLINE_BINARY, "cmdline:flask"));
         }
 
@@ -581,6 +606,79 @@ mod tests {
         assert!(DetectorRegistry::new()
             .detect(Some(dir.path()), Some(&exe), &cmdline, 22)
             .is_none());
+    }
+
+    /// A path containing "flask" is not a Flask process. The old substring
+    /// match fired on `/srv/flask_app/server.py` (weight 0.8, which beat
+    /// Django's 0.79) and mislabeled plain Python servers as Flask.
+    #[test]
+    fn test_a_path_containing_flask_does_not_imply_flask() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline = vec!["python".to_string(), "/srv/flask_app/server.py".to_string()];
+        let fw = DetectorRegistry::new().detect(Some(dir.path()), Some(&exe), &cmdline, 8000);
+        assert!(fw.is_none() || fw.unwrap().id != "flask");
+    }
+
+    /// `uvicorn` as the last argument has no trailing space in the joined
+    /// cmdline, which the old `contains("uvicorn ")` missed entirely.
+    #[test]
+    fn test_uvicorn_as_last_arg_is_detected() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline = vec![
+            "python".to_string(),
+            "-m".to_string(),
+            "uvicorn".to_string(),
+        ];
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 8000)
+            .unwrap();
+        assert_eq!(fw.id, "uvicorn");
+    }
+
+    /// `runserver_plus` (django-extensions) is still a Django dev command.
+    #[test]
+    fn test_django_runserver_plus_is_detected() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline = vec![
+            "python".to_string(),
+            "manage.py".to_string(),
+            "runserver_plus".to_string(),
+        ];
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 8000)
+            .unwrap();
+        assert_eq!(fw.id, "django");
+    }
+
+    /// A gunicorn *config file* passed as an argument is not a gunicorn
+    /// process: `contains("gunicorn")` fired on `--config gunicorn.conf.py`.
+    #[test]
+    fn test_gunicorn_config_path_does_not_imply_gunicorn() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline = vec![
+            "python".to_string(),
+            "--config".to_string(),
+            "/etc/gunicorn.conf.py".to_string(),
+        ];
+        let fw = DetectorRegistry::new().detect(Some(dir.path()), Some(&exe), &cmdline, 8000);
+        assert!(fw.is_none() || fw.unwrap().id != "gunicorn");
+    }
+
+    /// The real binary still fires: `gunicorn app:app` from the console
+    /// script or `python -m gunicorn`.
+    #[test]
+    fn test_gunicorn_binary_is_detected() {
+        let dir = project(&[]);
+        let exe = PathBuf::from("/usr/bin/python3.13");
+        let cmdline = vec!["gunicorn".to_string(), "app:app".to_string()];
+        let fw = DetectorRegistry::new()
+            .detect(Some(dir.path()), Some(&exe), &cmdline, 8000)
+            .unwrap();
+        assert_eq!(fw.id, "gunicorn");
     }
 
     #[test]

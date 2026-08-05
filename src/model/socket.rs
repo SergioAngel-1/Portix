@@ -135,8 +135,17 @@ pub struct Socket {
 
 impl Socket {
     /// Create a URL for this socket.
+    ///
+    /// A service bound to a specific non-loopback address is opened on that
+    /// address; loopback and wildcard binds are reachable via localhost.
     pub fn url(&self) -> String {
-        format!("http://localhost:{}", self.port)
+        match self.bind_scope {
+            BindScope::Specific(ip) => match ip {
+                IpAddr::V4(v4) => format!("http://{v4}:{}", self.port),
+                IpAddr::V6(v6) => format!("http://[{v6}]:{}", self.port),
+            },
+            _ => format!("http://localhost:{}", self.port),
+        }
     }
 
     /// Protocol as shown in the PROTO column, collapsing dual-stack pairs.
@@ -178,5 +187,41 @@ impl From<&Socket> for SocketId {
             port: s.port,
             inode: s.inode,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn socket(addr: IpAddr, port: u16) -> Socket {
+        Socket {
+            protocol: Protocol::Tcp,
+            local_addr: addr,
+            port,
+            state: TcpState::Listen,
+            bind_scope: BindScope::from_ip(addr),
+            inode: 1,
+            uid: 1000,
+            dual_stack: false,
+        }
+    }
+
+    #[test]
+    fn test_url_uses_localhost_for_wildcard_and_loopback() {
+        let wildcard = socket("0.0.0.0".parse().unwrap(), 3000);
+        assert_eq!(wildcard.url(), "http://localhost:3000");
+        let loopback = socket("127.0.0.1".parse().unwrap(), 3000);
+        assert_eq!(loopback.url(), "http://localhost:3000");
+    }
+
+    /// A service bound to a specific non-loopback address is opened on that
+    /// address — localhost would point at nothing.
+    #[test]
+    fn test_url_uses_specific_address() {
+        let v4 = socket("192.168.1.5".parse().unwrap(), 3000);
+        assert_eq!(v4.url(), "http://192.168.1.5:3000");
+        let v6 = socket("2001:db8::1".parse().unwrap(), 3000);
+        assert_eq!(v6.url(), "http://[2001:db8::1]:3000");
     }
 }

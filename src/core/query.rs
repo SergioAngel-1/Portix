@@ -73,25 +73,27 @@ impl Query {
     /// Convert a service to a searchable string.
     fn service_to_string(&self, service: &Service) -> String {
         use std::fmt::Write;
+        // `write!` into a String is infallible; `let _ =` is the idiomatic
+        // spelling and avoids the (impossible) unwrap.
         let mut buf = String::new();
-        write!(buf, "{}", service.socket.port).unwrap();
+        let _ = write!(buf, "{}", service.socket.port);
 
         if let Some(ref project) = service.project {
-            write!(buf, " {}", project.display_name()).unwrap();
+            let _ = write!(buf, " {}", project.display_name());
         }
         if let Some(ref framework) = service.framework {
-            write!(buf, " {}", framework.display_name).unwrap();
+            let _ = write!(buf, " {}", framework.display_name);
         }
         if let Some(ref process) = service.process {
-            write!(buf, " {}", process.command_display()).unwrap();
+            let _ = write!(buf, " {}", process.command_display());
         }
         if let Some(ref process) = service.process {
-            write!(buf, " {}", process.pid).unwrap();
+            let _ = write!(buf, " {}", process.pid);
         }
         if let Some(ref container) = service.container {
-            write!(buf, " {}", container.id).unwrap();
+            let _ = write!(buf, " {}", container.id);
             if let Some(ref name) = container.name {
-                write!(buf, " {}", name).unwrap();
+                let _ = write!(buf, " {}", name);
             }
         }
 

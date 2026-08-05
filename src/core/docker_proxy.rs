@@ -39,10 +39,15 @@ impl DockerProxyInfo {
                 || rest.starts_with("container-ip=")
                 || rest.starts_with("container-ip ")
             {
+                // The value is the `=`/space form, or the next argument. A
+                // flag without a value must not capture the *next flag* as its
+                // value (`-container-ip -proto tcp` would otherwise read
+                // "-proto"); anything unusable degrades to "unknown".
                 let value = rest
                     .strip_prefix("container-ip=")
                     .or_else(|| rest.strip_prefix("container-ip ").map(|s| s.trim()))
                     .or_else(|| args.get(i + 1).copied())
+                    .filter(|v| !v.is_empty() && !v.starts_with('-'))
                     .unwrap_or("unknown");
                 info.container_ip = Some(value.to_string());
             }
@@ -210,5 +215,34 @@ mod tests {
         rewrite_docker_proxy(&mut service);
         assert!(!service.docker_proxy_rewritten);
         assert!(service.project.is_some());
+    }
+
+    /// `-container-ip` with no value must not capture the *next flag* as its
+    /// value: the old code read "-proto" as the container IP and rendered
+    /// `🐳 -proto` in the UI.
+    #[test]
+    fn test_docker_proxy_flag_without_value_does_not_capture_next_flag() {
+        let mut service =
+            docker_proxy_service(&["/usr/bin/docker-proxy", "-container-ip", "-proto", "tcp"]);
+
+        rewrite_docker_proxy(&mut service);
+
+        assert!(service.docker_proxy_rewritten);
+        assert_eq!(
+            service.container.as_ref().unwrap().id,
+            "unknown",
+            "a flag is not a value; degrade to unknown"
+        );
+    }
+
+    /// An empty `=` value is equally unusable.
+    #[test]
+    fn test_docker_proxy_empty_equals_value_is_unknown() {
+        let mut service =
+            docker_proxy_service(&["/usr/bin/docker-proxy", "--container-ip=", "--proto", "tcp"]);
+
+        rewrite_docker_proxy(&mut service);
+
+        assert_eq!(service.container.as_ref().unwrap().id, "unknown");
     }
 }

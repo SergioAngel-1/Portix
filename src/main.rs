@@ -38,7 +38,7 @@ mod exit {
 #[command(version)]
 struct Cli {
     /// Show service for a specific port (accepts 3000 or :3000)
-    #[arg(value_name = "PORT", value_parser = parse_port)]
+    #[arg(value_name = "PORT", value_parser = parse_port, conflicts_with = "kill")]
     port: Option<u16>,
 
     /// Show service for a specific port (long form, PRD §12.2)
@@ -46,15 +46,20 @@ struct Cli {
     port_flag: Option<u16>,
 
     /// Output JSON
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["kill", "once"])]
     json: bool,
 
     /// Single frame, no TUI
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["kill", "json"])]
     once: bool,
 
     /// Kill service on port
-    #[arg(long, value_name = "PORT", value_parser = parse_port)]
+    #[arg(
+        long,
+        value_name = "PORT",
+        value_parser = parse_port,
+        conflicts_with_all = ["port", "port_flag", "json", "once"]
+    )]
     kill: Option<u16>,
 
     /// Force kill with SIGKILL instead of SIGTERM
@@ -165,7 +170,10 @@ fn run() -> Result<i32> {
 }
 
 fn use_color(cli: &Cli) -> bool {
-    !cli.no_color && std::env::var_os("NO_COLOR").is_none()
+    // no-color.org: NO_COLOR takes effect only when present *and non-empty*;
+    // `NO_COLOR=` (common under `env -i`) must not silently disable color.
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    !cli.no_color && !no_color
 }
 
 /// CPU needs two samples to produce a delta. A one-shot invocation would print
@@ -328,12 +336,27 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
     Ok(exit::OK)
 }
 
+/// Restores raw mode on drop, so an early `?` between `enable_raw_mode` and
+/// the explicit restore cannot strand the user's terminal (no echo, no
+/// newline). Double-restoring is harmless: the explicit `disable_raw_mode` at
+/// the end of `run_tui` runs first and the guard's second call is a no-op.
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
 fn run_tui(config: Config, mut engine: Engine, theme: Theme, color: bool) -> Result<()> {
     if !io::stdout().is_terminal() {
         anyhow::bail!("stdout is not a terminal; use --once or --json");
     }
 
     enable_raw_mode()?;
+    // From here on, every exit path must restore the terminal — leaving a
+    // user in raw mode on the alternate screen is worse than the error.
+    let _raw = RawModeGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);

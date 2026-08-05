@@ -175,9 +175,12 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
         }
     }
 
-    // Phase 3: Derive project name
-    let name = derive_project_name(&root, workspace_root.as_deref());
-    let technical_name = read_package_name(&root);
+    // Phase 3: Derive project name. The manifest is read once and shared by
+    // the display name and the technical name — reading package.json twice on
+    // every L2 cache miss is a doubled read + parse for no benefit.
+    let package_name = read_package_name(&root);
+    let name = derive_project_name(&root, workspace_root.as_deref(), package_name.as_deref());
+    let technical_name = package_name;
     let language = detect_language(&root);
 
     Some(Project {
@@ -191,12 +194,16 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
 }
 
 /// Derive a display name for the project, with workspace context.
-fn derive_project_name(root: &Path, workspace_root: Option<&Path>) -> String {
+fn derive_project_name(
+    root: &Path,
+    workspace_root: Option<&Path>,
+    package_name: Option<&str>,
+) -> String {
     // Try to read package name from manifest
-    if let Some(name) = read_package_name(root) {
+    if let Some(name) = package_name {
         // Skip generic names
-        if !matches!(name.as_str(), "app" | "server" | "main" | "test" | "") {
-            return name;
+        if !matches!(name, "app" | "server" | "main" | "test" | "") {
+            return name.to_string();
         }
     }
 

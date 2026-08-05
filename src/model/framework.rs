@@ -15,23 +15,6 @@ pub enum Language {
     Unknown,
 }
 
-impl Language {
-    pub fn display(&self) -> &str {
-        match self {
-            Language::Node => "Node",
-            Language::Python => "Python",
-            Language::Go => "Go",
-            Language::Rust => "Rust",
-            Language::Php => "PHP",
-            Language::Ruby => "Ruby",
-            Language::Java => "Java",
-            Language::Elixir => "Elixir",
-            Language::Dart => "Dart",
-            Language::Unknown => "—",
-        }
-    }
-}
-
 /// Confidence level for framework detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum FrameworkConfidence {

@@ -16,7 +16,7 @@ use ratatui::{
 /// `format::cell`, the mandatory sanitisation chokepoint (PRD §13.2). A process
 /// with `argv[0] = "\x1b]0;pwned\x07"` must not hijack the terminal from here.
 pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Theme) {
-    let area = centered_rect(66, 84, area);
+    let area = super::centered_percent(66, 84, area);
     f.render_widget(Clear, area);
 
     let Some(service) = service else {
@@ -137,7 +137,14 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
     if let Some(c) = &service.container {
         lines.push(section("CONTAINER"));
         lines.push(kv("Runtime", c.runtime.display().to_string()));
-        lines.push(kv("ID", cell(&c.id)));
+        // docker-proxy rows synthesize the container from cmdline flags, and
+        // their `id` actually holds the container *IP* (CLAUDE.md, "Docker
+        // proxy rewrite"); label it honestly instead of calling it an ID.
+        if service.docker_proxy_rewritten {
+            lines.push(kv("Address", cell(&c.id)));
+        } else {
+            lines.push(kv("ID", cell(&c.id)));
+        }
         if let Some(name) = &c.name {
             lines.push(kv("Name", cell(name)));
         }
@@ -220,28 +227,6 @@ fn bind_scope_label(scope: &BindScope) -> String {
         BindScope::AllInterfaces => "all interfaces".to_string(),
         BindScope::Specific(ip) => ip.to_string(),
     }
-}
-
-/// Create a centered rectangle covering `percent_x` × `percent_y` of `r`.
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    use ratatui::layout::{Constraint, Direction, Layout};
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
 }
 
 #[cfg(test)]

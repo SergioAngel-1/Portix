@@ -64,24 +64,45 @@ impl Default for Config {
     }
 }
 
+/// The directory holding `config.toml`, honoring XDG.
+///
+/// Under `sudo portix` (PRD §13.3), sudo resets `$HOME` to the root user's:
+/// the invoking user's config would be ignored, and a theme save would land
+/// in `/root/.config`. When `$SUDO_USER` is set, resolve that user's home via
+/// passwd instead. Falls back to the XDG resolution (which itself falls back
+/// to `~/.config/portix`) when there is no `$SUDO_USER` to honor.
+fn config_dir() -> PathBuf {
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        if !user.is_empty() {
+            if let Some(home) = crate::platform::linux::proc::home_dir_for_user(&user) {
+                return home.join(".config/portix");
+            }
+        }
+    }
+    directories::ProjectDirs::from("", "", "portix")
+        .map(|d| d.config_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("~/.config/portix"))
+}
+
 impl Config {
     /// Load configuration from the default location.
     pub fn load() -> Self {
-        let config_dir = directories::ProjectDirs::from("", "", "portix")
-            .map(|d| d.config_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("~/.config/portix"));
+        let config_dir = config_dir();
 
         let config_file = config_dir.join("config.toml");
 
         if config_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&config_file) {
-                if let Ok(config) = toml::from_str(&content) {
-                    return config;
-                }
-                eprintln!(
-                    "portix: config.toml exists but is invalid TOML; using defaults. Fix or remove {}",
-                    config_file.display()
-                );
+            match std::fs::read_to_string(&config_file) {
+                Ok(content) => match toml::from_str(&content) {
+                    Ok(config) => return config,
+                    Err(_) => eprintln!(
+                        "portix: config.toml exists but is invalid TOML; using defaults. Fix or remove {}",
+                        config_file.display()
+                    ),
+                },
+                Err(e) => eprintln!(
+                    "portix: config.toml exists but could not be read ({e}); using defaults",
+                ),
             }
         }
 
@@ -95,10 +116,7 @@ impl Config {
 
     /// Path to the config file, honoring XDG.
     fn config_path() -> PathBuf {
-        directories::ProjectDirs::from("", "", "portix")
-            .map(|d| d.config_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("~/.config/portix"))
-            .join("config.toml")
+        config_dir().join("config.toml")
     }
 
     /// Persist the current theme back to `config.toml`, surgically: only the

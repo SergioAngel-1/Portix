@@ -80,7 +80,7 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
         .header(header)
         .row_highlight_style(
             Style::default()
-                .bg(theme.muted)
+                .bg(theme.selection)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▸ ");

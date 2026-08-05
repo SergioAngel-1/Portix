@@ -23,15 +23,19 @@ pub fn get_num_cpus() -> usize {
 /// Jiffies per second, as the kernel reports them to userspace.
 ///
 /// `/proc/<pid>/stat` expresses utime/stime/starttime in these units. Hardcoding
-/// 100 is right on most builds and silently wrong on the rest.
+/// 100 is right on most builds and silently wrong on the rest. `sysconf` is
+/// constant for the lifetime of the kernel, so it is queried once and memoized.
 pub fn clock_ticks_per_sec() -> u64 {
-    #[allow(unsafe_code)]
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if hz > 0 {
-        hz as u64
-    } else {
-        100
-    }
+    static HZ: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *HZ.get_or_init(|| {
+        #[allow(unsafe_code)]
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if hz > 0 {
+            hz as u64
+        } else {
+            100
+        }
+    })
 }
 
 /// Calculate CPU percentage from two samples of (process jiffies, system jiffies).

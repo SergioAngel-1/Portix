@@ -22,7 +22,11 @@ impl Runtime {
     }
 
     pub fn glyph(&self) -> &str {
-        "🐳"
+        // Docker gets its whale; the other runtimes share a neutral box.
+        match self {
+            Runtime::Docker => "🐳",
+            _ => "📦",
+        }
     }
 }
 

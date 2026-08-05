@@ -16,6 +16,8 @@ pub struct Theme {
     pub muted: Color,
     pub text: Color,
     pub bg: Color,
+    /// Background of the selected table row.
+    pub selection: Color,
 }
 
 impl Theme {
@@ -31,6 +33,7 @@ impl Theme {
             muted: Color::DarkGray,
             text: Color::White,
             bg: Color::Black,
+            selection: Color::DarkGray,
         }
     }
 
@@ -48,12 +51,14 @@ impl Theme {
             muted: Color::DarkGray,
             text: Color::White,
             bg: Color::Black,
+            selection: Color::DarkGray,
         }
     }
 
     /// Create a theme based on terminal capabilities.
     pub fn from_terminal() -> Self {
-        if std::env::var("NO_COLOR").is_ok() {
+        // no-color.org: NO_COLOR takes effect only when present and non-empty.
+        if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) {
             return Self::monochrome();
         }
         if let Ok(term) = std::env::var("COLORTERM") {
@@ -109,6 +114,7 @@ impl Theme {
             Role::Label => self.label,
             Role::Muted => self.muted,
             Role::Text => self.text,
+            Role::Selection => self.selection,
         }
     }
 }
@@ -124,6 +130,7 @@ pub enum Role {
     Label,
     Muted,
     Text,
+    Selection,
 }
 
 #[cfg(test)]
