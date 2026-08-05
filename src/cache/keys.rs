@@ -19,6 +19,39 @@ pub fn inode(path: &std::path::Path) -> Option<u64> {
     })
 }
 
+/// Inode and modification time of a path, from a **single** `stat`.
+///
+/// L2 keys on the pair `(inode, mtime)`: the inode survives renames (a
+/// `git mv` of the project directory does not invalidate), and the mtime
+/// catches a manifest *appearing in* or *disappearing from* a directory that
+/// previously had none — the "project just got `pnpm init`-ed under a running
+/// server" case, which a bare inode key served stale negatives for up to the
+/// L2 TTL. Querying both halves in one call keeps the hot path at one
+/// syscall per process per scan.
+///
+/// The mtime is the *directory's*, not the manifest's: it changes exactly
+/// when a marker file is created or deleted (the events that change the
+/// project-detection answer). Content edits to an existing manifest do not
+/// change it, but those change framework/version, which the L3 key already
+/// invalidates via `mtime(manifest)`.
+pub fn inode_and_mtime(path: &std::path::Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    };
+    #[cfg(not(unix))]
+    let ino = 0;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())?;
+    Some((ino, mtime))
+}
+
 /// Get the modification time as a u64 for cache invalidation.
 ///
 /// Nanosecond resolution: the L3 framework key carries the manifest mtime, and

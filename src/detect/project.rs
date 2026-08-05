@@ -267,30 +267,38 @@ fn read_package_name(root: &Path) -> Option<String> {
     }
 
     // Cargo.toml: only the name under [package]. A bare `name =` scan picks up
-    // the first dependency entry in a workspace manifest.
+    // the first dependency entry in a workspace manifest, and a line-based
+    // parser cannot even see that `name = "x" # comment` (legal TOML) is a
+    // comment — the old `trim_matches('"')` produced `x" # comment`. The
+    // `toml` crate parses the real grammar: inline comments, single quotes,
+    // escapes.
     if let Some(content) = read_manifest(&root.join("Cargo.toml")) {
-        let mut in_package = false;
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with('[') {
-                in_package = line == "[package]";
-                continue;
-            }
-            if in_package {
-                if let Some((key, value)) = line.split_once('=') {
-                    if key.trim() == "name" {
-                        return Some(value.trim().trim_matches('"').to_string());
-                    }
-                }
+        if let Ok(value) = content.parse::<toml::Value>() {
+            if let Some(name) = value
+                .get("package")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                return Some(name.to_string());
             }
         }
     }
 
-    // go.mod: the last path component of the module path.
+    // go.mod: the last path component of the module path. The module line can
+    // carry a trailing comment (`module x // fork`), so take the first
+    // whitespace token before splitting on `/`.
     if let Some(content) = read_manifest(&root.join("go.mod")) {
         for line in content.lines() {
-            if let Some(module) = line.strip_prefix("module ") {
-                if let Some(name) = module.trim().rsplit('/').next() {
+            if let Some(rest) = line.strip_prefix("module") {
+                let rest = rest.trim_start();
+                if rest.is_empty() || rest.starts_with("//") {
+                    continue;
+                }
+                if let Some(name) = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|m| m.rsplit('/').next())
+                {
                     return Some(name.to_string());
                 }
             }
@@ -384,9 +392,42 @@ mod tests {
         assert_eq!(read_package_name(dir.path()), Some("portix".to_string()));
     }
 
+    /// `name = "portix" # comment` is legal TOML. The old line-based parser
+    /// returned `portix" # comment` — the trailing comment kept the closing
+    /// quote from being trimmed.
+    #[test]
+    fn test_cargo_name_with_inline_comment_is_parsed_cleanly() {
+        let dir = project(&[(
+            "Cargo.toml",
+            "[package]\nname = \"portix\" # the explorer\n",
+        )]);
+        assert_eq!(read_package_name(dir.path()), Some("portix".to_string()));
+    }
+
+    /// Single-quoted strings are legal TOML too; the old `trim_matches('"')`
+    /// left the quotes in place.
+    #[test]
+    fn test_cargo_name_with_single_quotes_is_parsed_cleanly() {
+        let dir = project(&[("Cargo.toml", "[package]\nname = 'portix'\n")]);
+        assert_eq!(read_package_name(dir.path()), Some("portix".to_string()));
+    }
+
     #[test]
     fn test_go_module_name_is_last_path_component() {
         let dir = project(&[("go.mod", "module github.com/acme/ml-scoring\n")]);
+        assert_eq!(
+            read_package_name(dir.path()),
+            Some("ml-scoring".to_string())
+        );
+    }
+
+    /// A trailing comment on the module line must not leak into the name.
+    #[test]
+    fn test_go_module_name_ignores_trailing_comment() {
+        let dir = project(&[(
+            "go.mod",
+            "module github.com/acme/ml-scoring // internal fork\n",
+        )]);
         assert_eq!(
             read_package_name(dir.path()),
             Some("ml-scoring".to_string())

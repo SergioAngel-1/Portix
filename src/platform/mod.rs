@@ -12,7 +12,12 @@ use std::path::Path;
 ///
 /// No module outside of `platform/` should import /proc, rustix, or system
 /// absolute paths.
-pub trait PlatformProbe {
+///
+/// `Send` is required because the TUI hands the `Engine` (which boxes this
+/// trait) to the collector thread that runs the periodic scans off the UI
+/// thread; the UI thread locks it back for the rare synchronous kill-path
+/// re-scans.
+pub trait PlatformProbe: Send {
     /// List all listening sockets on the system.
     fn list_listening_sockets(&self) -> Result<Vec<Socket>>;
 

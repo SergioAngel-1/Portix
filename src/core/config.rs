@@ -183,7 +183,7 @@ impl Config {
 /// Replace the `theme = "…"` line in a config file, or prepend it if absent.
 /// Commented lines (`# theme = …`) are left untouched.
 fn upsert_theme_line(content: &str, theme: &str) -> String {
-    let new_line = format!("theme = \"{theme}\"");
+    let new_line = format!("theme = {}", toml_basic_string(theme));
     let mut replaced = false;
 
     let mut lines: Vec<String> = content
@@ -205,6 +205,39 @@ fn upsert_theme_line(content: &str, theme: &str) -> String {
 
     let mut out = lines.join("\n");
     out.push('\n');
+    out
+}
+
+/// Quote a value as a TOML basic string.
+///
+/// The theme name normally comes from the fixed `Theme::NAMES`, but it can
+/// also be read back from a hand-edited `config.toml` (`theme = 'ra"ro'` is
+/// valid TOML). Writing such a name back with `format!("theme = \"{name}\"")`
+/// would corrupt the file on the next load. Rust's `escape_default` is not
+/// enough either: it leaves control characters raw, which TOML forbids in
+/// basic strings, and it renders `\u{...}` forms that TOML does not accept.
+/// This writes exactly the escapes TOML defines.
+fn toml_basic_string(value: &str) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{C}' => out.push_str("\\f"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
     out
 }
 
@@ -232,6 +265,31 @@ mod tests {
     #[test]
     fn test_upsert_into_empty_file() {
         assert_eq!(upsert_theme_line("", "auto"), "theme = \"auto\"\n");
+    }
+
+    /// A theme name read back from a hand-edited config can contain quotes,
+    /// backslashes or even newlines. Writing it raw corrupts the file; the
+    /// escaped form must round-trip through a real TOML parse.
+    #[test]
+    fn test_theme_with_hostile_name_round_trips_through_toml() {
+        let hostile = "ra\"ro\\\n\t\x01";
+        let updated = upsert_theme_line("refresh_ms = 500\n", hostile);
+        let parsed: toml::Value = toml::from_str(&updated).unwrap();
+        assert_eq!(parsed["theme"].as_str(), Some(hostile));
+        assert_eq!(parsed["refresh_ms"].as_integer(), Some(500));
+
+        // And the file must still parse on the next load (Config::load path).
+        let config: Config = toml::from_str(&updated).unwrap();
+        assert_eq!(config.theme, hostile);
+    }
+
+    /// The escaped line must still be recognised as the theme key by a
+    /// second upsert (the value is read back, modified, written again).
+    #[test]
+    fn test_escaped_theme_line_is_recognised_by_next_upsert() {
+        let first = upsert_theme_line("", "ra\"ro");
+        let second = upsert_theme_line(&first, "mono");
+        assert_eq!(second, "theme = \"mono\"\n");
     }
 
     /// The first theme save on a machine with no config.toml must create the

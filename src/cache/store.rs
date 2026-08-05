@@ -33,8 +33,12 @@ pub struct CpuSample {
 /// Multi-level cache for process data.
 #[derive(Default)]
 pub struct CacheStore {
-    /// L2: Project, keyed by the inode of the cwd (not its path).
-    l2_project: HashMap<u64, CacheEntry<Option<Project>>>,
+    /// L2: Project, keyed by `(inode of the cwd, mtime of the cwd)` — not the
+    /// path. The inode survives renames; the mtime invalidates the entry the
+    /// moment a manifest appears in or disappears from a previously
+    /// manifest-less cwd, so a freshly `pnpm init`-ed directory stops serving
+    /// the cached "no project" answer immediately instead of for the whole TTL.
+    l2_project: HashMap<(u64, u64), CacheEntry<Option<Project>>>,
     /// L3: Framework, keyed by (inode of project root, mtime of manifest, and a
     /// discriminator over the process inputs detection also depends on).
     l3_framework: HashMap<(u64, u64, u64), CacheEntry<Option<Framework>>>,
@@ -52,16 +56,23 @@ impl CacheStore {
     /// Get a project from L2 cache. The outer Option is "cached?", the inner is
     /// "is there a project?" — negative results are cached too, otherwise every
     /// scan re-walks the directory tree for sshd and systemd-resolved.
-    pub fn get_project(&self, cwd_inode: u64) -> Option<&Option<Project>> {
+    ///
+    /// `cwd_mtime` is the modification time of the cwd directory at the moment
+    /// of the lookup; a mismatch with the key the entry was inserted under
+    /// means the directory's contents changed (a manifest appeared or
+    /// vanished), so the cached answer is stale.
+    pub fn get_project(&self, cwd_inode: u64, cwd_mtime: u64) -> Option<&Option<Project>> {
         self.l2_project
-            .get(&cwd_inode)
+            .get(&(cwd_inode, cwd_mtime))
             .filter(|e| e.is_valid())
             .map(|e| &e.value)
     }
 
-    pub fn insert_project(&mut self, cwd_inode: u64, project: Option<Project>) {
-        self.l2_project
-            .insert(cwd_inode, CacheEntry::new(project, Duration::from_secs(60)));
+    pub fn insert_project(&mut self, cwd_inode: u64, cwd_mtime: u64, project: Option<Project>) {
+        self.l2_project.insert(
+            (cwd_inode, cwd_mtime),
+            CacheEntry::new(project, Duration::from_secs(60)),
+        );
     }
 
     /// Get a framework.
@@ -137,6 +148,40 @@ mod tests {
 
         assert!(cache.get_framework(7, 1000, 0).is_some());
         assert!(cache.get_framework(7, 2000, 0).is_none());
+    }
+
+    /// The bug this fixes: a directory with no manifest caches a negative L2
+    /// answer; when `pnpm init` later creates package.json there, the cached
+    /// "no project" must not keep serving for the rest of the 60 s TTL. The
+    /// cwd's mtime changes the moment the file appears, so the key misses.
+    #[test]
+    fn test_l2_negative_invalidated_when_cwd_mtime_changes() {
+        let mut cache = CacheStore::new();
+        cache.insert_project(7, 1000, None);
+
+        // Same inode, same mtime: the cached negative serves (no re-walk).
+        assert!(cache.get_project(7, 1000).is_some());
+        assert!(cache.get_project(7, 1000).unwrap().is_none());
+
+        // A manifest appeared: the directory mtime changed, the key misses,
+        // and re-detection can cache the fresh answer.
+        assert!(cache.get_project(7, 2000).is_none());
+        cache.insert_project(
+            7,
+            2000,
+            Some(Project {
+                root: std::path::PathBuf::from("/w"),
+                workspace_root: None,
+                name: "web".into(),
+                technical_name: None,
+                language: None,
+                package_manager: None,
+            }),
+        );
+        assert!(cache.get_project(7, 2000).unwrap().is_some());
+        // The stale negative is still there under its old mtime but can never
+        // be reached: no lookup will present mtime 1000 again.
+        assert!(cache.get_project(7, 1000).unwrap().is_none());
     }
 
     /// Two processes sharing a project root but differing in their inputs (a

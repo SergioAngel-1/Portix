@@ -370,15 +370,22 @@ impl Engine {
             return (None, None);
         };
 
-        let project = match crate::cache::keys::inode(cwd) {
-            Some(cwd_inode) => match self.cache.get_project(cwd_inode) {
+        let project = match crate::cache::keys::inode_and_mtime(cwd) {
+            // One stat yields both halves of the L2 key. The mtime makes a
+            // freshly initialized directory (manifest appeared since the last
+            // scan) miss the cached "no project" instead of serving it for the
+            // whole 60 s TTL.
+            Some((cwd_inode, cwd_mtime)) => match self.cache.get_project(cwd_inode, cwd_mtime) {
                 Some(cached) => cached.clone(),
                 None => {
                     let project = detect_project(cwd);
-                    self.cache.insert_project(cwd_inode, project.clone());
+                    self.cache
+                        .insert_project(cwd_inode, cwd_mtime, project.clone());
                     project
                 }
             },
+            // The cwd vanished (or is unreadable): nothing to key on, and
+            // detection will fail anyway — do it uncached.
             None => detect_project(cwd),
         };
 
@@ -656,6 +663,16 @@ mod tests {
 
     fn engine_with(config: Config) -> Engine {
         Engine::new(Some(tempfile::tempdir().unwrap().path()), config)
+    }
+
+    /// The engine crosses threads: the TUI's collector thread owns the
+    /// periodic scans while the UI thread locks it for kill re-resolutions
+    /// (both hold `Arc<Mutex<Engine>>`). This guard fails to compile the day
+    /// a field makes `Engine` `!Send`.
+    #[test]
+    fn engine_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Engine>();
     }
 
     #[test]

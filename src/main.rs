@@ -15,7 +15,8 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use portix_lib::core::{Config, Engine};
@@ -357,6 +358,17 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, skip_confirm: bool) ->
         .map(|p| p.pid.to_string())
         .unwrap_or_else(|| "unknown".into());
 
+    // Confirmation is an interactive act. A non-terminal stdin (a pipe, a
+    // fifo, /dev/null) must not block the prompt forever waiting for a line
+    // that never comes — and silently reading a piped "y" would make the
+    // confirmation meaningless anyway. Scripts get the same effect through
+    // `--yes` / `kill_confirm = false`, which took the skip_confirm path
+    // above.
+    if !io::stdin().is_terminal() {
+        eprintln!("stdin is not a terminal; pass --yes to skip confirmation");
+        return Ok(exit::OK);
+    }
+
     eprint!(
         "Kill {} on port {port} (pid {pid})? [y/N] ",
         cell(&service.project_display())
@@ -403,7 +415,7 @@ impl Drop for RawModeGuard {
     }
 }
 
-fn run_tui(config: Config, mut engine: Engine, theme: Theme, color: bool) -> Result<()> {
+fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<()> {
     if !io::stdout().is_terminal() {
         anyhow::bail!("stdout is not a terminal; use --once or --json");
     }
@@ -428,10 +440,27 @@ fn run_tui(config: Config, mut engine: Engine, theme: Theme, color: bool) -> Res
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // The engine is shared: the collector thread owns the periodic scans (so
+    // a slow scan never freezes the UI), while the UI thread locks it for the
+    // rare synchronous re-scans the kill path needs — the modal must be armed
+    // before the next draw. The mutex is held only for the duration of a
+    // scan, so the two never deadlock (neither waits on the other while
+    // holding the lock).
+    let engine = Arc::new(Mutex::new(engine));
+    let refresh = Duration::from_millis(config.min_refresh_ms());
+    let (tx, rx) = mpsc::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let collector = {
+        let engine = Arc::clone(&engine);
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || collector_loop(engine, tx, refresh, shutdown))
+    };
+
     let result = event_loop(
         &mut terminal,
         config,
-        &mut engine,
+        &engine,
+        rx,
         theme,
         color,
         interrupted,
@@ -443,22 +472,62 @@ fn run_tui(config: Config, mut engine: Engine, theme: Theme, color: bool) -> Res
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    // Stop the collector (it sleeps in short slices, so this returns quickly)
+    // and wait for it to release the engine before `result` is returned.
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = collector.join();
+
     result
+}
+
+/// The periodic scan loop, off the UI thread.
+///
+/// Scans run back-to-back with a `refresh` pause between them; each snapshot
+/// is handed to the UI over the channel. The engine is locked only for the
+/// duration of each scan, so the UI thread can still lock it for the
+/// synchronous kill-path re-scans (`Effect::KillRequest` / `Effect::Kill`).
+/// The pause is slept in short slices so `shutdown` is honoured promptly.
+fn collector_loop(
+    engine: Arc<Mutex<Engine>>,
+    tx: mpsc::Sender<SharedSnapshot>,
+    refresh: Duration,
+    shutdown: Arc<AtomicBool>,
+) {
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        let snapshot = engine.lock().unwrap_or_else(|p| p.into_inner()).scan();
+        if tx.send(snapshot).is_err() {
+            break; // The UI is gone; nothing left to feed.
+        }
+        let deadline = Instant::now() + refresh;
+        while Instant::now() < deadline {
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            thread::sleep(remaining.min(Duration::from_millis(50)));
+        }
+    }
 }
 
 fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     config: Config,
-    engine: &mut Engine,
+    engine: &Arc<Mutex<Engine>>,
+    rx: mpsc::Receiver<SharedSnapshot>,
     theme: Theme,
     color: bool,
     interrupted: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut app = App::new(config.clone(), theme, color);
-    app.update_snapshot(engine.scan());
 
     let refresh = Duration::from_millis(config.min_refresh_ms());
-    let mut last_scan = Instant::now();
+    // First frame draws immediately with the empty snapshot; the collector's
+    // first scan fills the table within one scan duration. Input is never
+    // blocked by the scan, which runs on its own thread.
+    let mut dirty = true;
 
     loop {
         // A termination signal (SIGTERM/SIGHUP/kill -INT) must exit through
@@ -469,10 +538,27 @@ fn event_loop<B: ratatui::backend::Backend>(
             return Ok(());
         }
 
-        terminal.draw(|f| draw(f, &app))?;
+        // Drain whatever snapshots the collector produced since the last
+        // iteration. Drawing only when something actually changed keeps CPU
+        // at rest between events indistinguishable from zero.
+        let mut got_snapshot = false;
+        while let Ok(snapshot) = rx.try_recv() {
+            app.update_snapshot(snapshot);
+            got_snapshot = true;
+        }
+        if got_snapshot || dirty {
+            terminal.draw(|f| draw(f, &app))?;
+            dirty = false;
+        }
 
-        // Wake up for input, but never sleep past the next refresh.
-        let timeout = refresh.saturating_sub(last_scan.elapsed());
+        // Wake up for input, but never sleep past the next refresh. The poll
+        // timeout is deliberately shorter than the refresh: the collector's
+        // cadence (scan + pause) drifts against this loop's own cadence, and
+        // a full `refresh` poll would let snapshots sit in the channel for up
+        // to one scan duration. A 100 ms cap bounds pickup latency while
+        // costing only a handful of near-zero-cost wakeups per second (no
+        // redraw happens unless something changed).
+        let timeout = refresh.min(Duration::from_millis(100));
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 // Key events fire on press *and* release on some terminals.
@@ -489,6 +575,7 @@ fn event_loop<B: ratatui::backend::Backend>(
                         return Ok(());
                     }
                 }
+                dirty = true;
             }
         }
 
@@ -496,11 +583,6 @@ fn event_loop<B: ratatui::backend::Backend>(
         // event above) still ends the loop cleanly.
         if interrupted.load(Ordering::Relaxed) {
             return Ok(());
-        }
-
-        if last_scan.elapsed() >= refresh {
-            app.update_snapshot(engine.scan());
-            last_scan = Instant::now();
         }
     }
 }
@@ -541,7 +623,7 @@ fn confirmed_owner_mismatch(service: &Service, expected: Option<(i32, u64)>) -> 
     }
 }
 
-fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow {
+fn run_effect(effect: Effect, app: &mut App, engine: &Arc<Mutex<Engine>>) -> ControlFlow {
     match effect {
         Effect::Quit => return ControlFlow::Quit,
 
@@ -563,6 +645,11 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             // describe the process that owns the socket *now*. The inode pins
             // the exact row the user selected — another process on the same
             // port (SO_REUSEPORT, containers) is not that row.
+            //
+            // This locks the engine away from the collector for the duration
+            // of one scan. The modal must be armed before the next draw, so
+            // the wait is unavoidable and rare (one user keystroke).
+            let mut engine = engine.lock().unwrap_or_else(|p| p.into_inner());
             match engine.service_on_inode(inode) {
                 Some(service) => app.arm_kill(service, signal),
                 None => app.error = Some("the selected service is no longer listening".into()),
@@ -574,6 +661,7 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             // socket may have been closed (and its inode freed) in that
             // window. Re-resolve from a fresh scan so we signal the process
             // that owns the socket now, not a ghost.
+            let mut engine = engine.lock().unwrap_or_else(|p| p.into_inner());
             match engine.service_on_inode(inode) {
                 Some(service) => {
                     // If the user confirmed a specific process in the modal,
@@ -594,7 +682,12 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             }
         }
 
-        Effect::Refresh => app.update_snapshot(engine.scan()),
+        Effect::Refresh => {
+            // A manual refresh is user-initiated, so an inline scan is fine —
+            // it locks the engine away from the collector for one scan.
+            let snapshot = engine.lock().unwrap_or_else(|p| p.into_inner()).scan();
+            app.update_snapshot(snapshot);
+        }
 
         Effect::PersistConfig => {
             if let Err(e) = app.config.save_theme() {
