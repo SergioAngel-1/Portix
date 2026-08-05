@@ -280,7 +280,12 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
         return Ok(exit::NO_MATCH);
     };
 
-    if !yes {
+    // The identity pin of the process the confirmation text described. With
+    // `--yes` no text was shown, so nobody was confirmed: whoever owns the
+    // port when the signal is sent is the target.
+    let expected = if yes {
+        None
+    } else {
         let pid = service
             .process
             .as_ref()
@@ -299,7 +304,8 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
             eprintln!("Cancelled.");
             return Ok(exit::OK);
         }
-    }
+        owner_pin(&service)
+    };
 
     let signal = if force { Signal::Kill } else { Signal::Term };
     // The user may have taken seconds to answer; re-resolve from a fresh scan
@@ -311,6 +317,12 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, yes: bool) -> Result<i
             return Ok(exit::NO_MATCH);
         }
     };
+    // And if that fresh scan shows a *different* process than the one the
+    // prompt described, refuse: the user confirmed that process, not this one.
+    if let Some(why) = confirmed_owner_mismatch(&service, expected) {
+        eprintln!("Refusing to kill: the owner of port {port} changed ({why})");
+        return Ok(exit::ERROR);
+    }
     engine.signal_service(&service, signal)?;
     eprintln!("Sent {signal:?} to service on port {port}");
     Ok(exit::OK)
@@ -388,6 +400,36 @@ enum ControlFlow {
     Quit,
 }
 
+/// The `(pid, starttime)` identity pin of a service's process, if readable.
+///
+/// `starttime_jiffies` is the half of the identity that survives PID reuse: a
+/// recycled PID carries a different start time. This pair is what the kill
+/// confirmation pins, so a port re-bound between confirmation and signal can
+/// be detected.
+fn owner_pin(service: &Service) -> Option<(i32, u64)> {
+    service
+        .process
+        .as_ref()
+        .map(|p| (p.pid, p.starttime_jiffies))
+}
+
+/// Compare a freshly re-resolved service against the identity the user
+/// confirmed in the kill modal.
+///
+/// `expected` is `Some((pid, starttime))` when the confirmation described a
+/// specific process, `None` for an immediate (unconfirmed) kill. Returns the
+/// reason the confirmed owner no longer matches, or `None` when signalling is
+/// safe. The runner must abort on `Some(..)`: killing the new owner of a
+/// re-bound port would kill a process the user never confirmed.
+fn confirmed_owner_mismatch(service: &Service, expected: Option<(i32, u64)>) -> Option<String> {
+    let expected = expected?; // no confirmation shown: kill whoever owns it now
+    match owner_pin(service) {
+        Some(actual) if actual == expected => None,
+        Some((pid, _)) => Some(format!("pid {} -> pid {}", expected.0, pid)),
+        None => Some("process metadata is unreadable".to_string()),
+    }
+}
+
 fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow {
     match effect {
         Effect::Quit => return ControlFlow::Quit,
@@ -414,13 +456,21 @@ fn run_effect(effect: Effect, app: &mut App, engine: &mut Engine) -> ControlFlow
             }
         }
 
-        Effect::Kill(port, signal) => {
+        Effect::Kill(port, expected, signal) => {
             // The snapshot the UI holds can be seconds old: a process may have
             // exited and another bound the same port in that window. Re-resolve
             // from a fresh scan so we signal the current owner, not a ghost.
             match engine.service_on_port(port) {
                 Some(service) => {
-                    if let Err(e) = engine.signal_service(&service, signal) {
+                    // If the user confirmed a specific process in the modal,
+                    // only that process may be signalled. The port can be
+                    // re-bound while the modal is open, and killing the new
+                    // owner would kill a process the user never confirmed.
+                    if let Some(why) = confirmed_owner_mismatch(&service, expected) {
+                        app.error = Some(format!(
+                            "not killing: the owner of port {port} changed ({why})"
+                        ));
+                    } else if let Err(e) = engine.signal_service(&service, signal) {
                         app.error = Some(e.to_string());
                     }
                 }
@@ -507,5 +557,94 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
 
     if app.show_help() {
         portix_lib::ui::views::help::render(f, f.area(), &app.snapshot.degradations, &app.theme);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use portix_lib::model::{
+        BindScope, Process, ProcessState, Protocol, ServiceId, Socket, TcpState,
+    };
+
+    fn service_with(pid: i32, starttime: u64) -> Service {
+        let socket = Socket {
+            protocol: Protocol::Tcp,
+            local_addr: std::net::Ipv4Addr::LOCALHOST.into(),
+            port: 3000,
+            state: TcpState::Listen,
+            bind_scope: BindScope::Loopback,
+            inode: 1,
+            uid: 1000,
+            dual_stack: false,
+        };
+        Service {
+            id: ServiceId::from_socket(&socket),
+            socket,
+            process: Some(Process {
+                pid,
+                ppid: 1,
+                name: "node".into(),
+                cmdline: vec!["node".into()],
+                exe: None,
+                cwd: None,
+                uid: Some(1000),
+                user: None,
+                started_at: None,
+                starttime_jiffies: starttime,
+                cpu_jiffies: 0,
+                metrics: Default::default(),
+                state: ProcessState::Sleeping,
+                threads: 1,
+            }),
+            project: None,
+            framework: None,
+            container: None,
+            docker_proxy_rewritten: false,
+        }
+    }
+
+    /// An immediate (unconfirmed) kill carries no pin: whoever owns the port
+    /// now is the target.
+    #[test]
+    fn test_unconfirmed_kill_has_no_pin() {
+        let svc = service_with(10, 5);
+        assert_eq!(confirmed_owner_mismatch(&svc, None), None);
+    }
+
+    /// The exact process the user confirmed is still the owner: signal it.
+    #[test]
+    fn test_matching_owner_is_confirmable() {
+        let svc = service_with(10, 5);
+        assert_eq!(confirmed_owner_mismatch(&svc, Some((10, 5))), None);
+    }
+
+    /// Same pid, different starttime: the pid was recycled into a different
+    /// process since the confirmation. Refuse.
+    #[test]
+    fn test_recycled_pid_is_not_the_confirmed_owner() {
+        let svc = service_with(10, 999);
+        assert!(confirmed_owner_mismatch(&svc, Some((10, 5))).is_some());
+    }
+
+    /// The port was re-bound by a completely different process: refuse, and
+    /// say which pid took over.
+    #[test]
+    fn test_rebound_port_is_not_the_confirmed_owner() {
+        let svc = service_with(20, 5);
+        let why = confirmed_owner_mismatch(&svc, Some((10, 5))).unwrap();
+        assert!(
+            why.contains("pid 10"),
+            "reason mentions the confirmed pid: {why}"
+        );
+    }
+
+    /// The re-resolved service has no readable process metadata: cannot prove
+    /// it is the confirmed owner, so refuse rather than kill blind.
+    #[test]
+    fn test_unreadable_process_cannot_be_confirmed() {
+        let mut svc = service_with(10, 5);
+        svc.process = None;
+        assert!(confirmed_owner_mismatch(&svc, Some((10, 5))).is_some());
     }
 }

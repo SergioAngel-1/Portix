@@ -39,7 +39,9 @@ pub struct App {
     theme_saved: Option<(String, Theme)>,
     /// Freshly re-resolved service awaiting kill confirmation, armed by
     /// `main.rs::run_effect` when `Effect::KillRequest` is processed. `None`
-    /// outside `Mode::ConfirmKill`.
+    /// outside `Mode::ConfirmKill`. On confirm, its `(pid, starttime)`
+    /// identity becomes the pin carried by `Effect::Kill`, so a port that is
+    /// re-bound while the modal is open is never killed silently.
     pending_kill: Option<(Service, Signal)>,
     /// Set when an effect failed, shown in the status bar until the next action.
     pub error: Option<String>,
@@ -169,10 +171,17 @@ impl App {
                 }
                 KeyCode::Enter | KeyCode::Char('y') => {
                     // The service shown in the modal is the freshly re-resolved
-                    // one; carry its port so the actual signal is re-verified
-                    // against the live process once more in run_effect.
+                    // one. Pin its (pid, starttime) identity so the runner
+                    // refuses to signal if the port has since been re-bound by
+                    // a different process: the user confirmed *this* process,
+                    // and killing the new owner would be killing something they
+                    // never saw.
                     if let Some((service, signal)) = self.pending_kill.take() {
-                        effects.push(Effect::Kill(service.socket.port, signal));
+                        let pin = service
+                            .process
+                            .as_ref()
+                            .map(|p| (p.pid, p.starttime_jiffies));
+                        effects.push(Effect::Kill(service.socket.port, pin, signal));
                     }
                     self.mode = Mode::Normal;
                 }
@@ -242,7 +251,10 @@ impl App {
             // and arms the modal with the current owner (Effect::KillRequest).
             effects.push(Effect::KillRequest(service.socket.port, signal));
         } else {
-            effects.push(Effect::Kill(service.socket.port, signal));
+            // No confirmation was shown, so there is no identity to pin: the
+            // runner kills whoever owns the port *now* (the stale snapshot is
+            // never trusted as a signal target).
+            effects.push(Effect::Kill(service.socket.port, None, signal));
         }
     }
 
@@ -311,8 +323,13 @@ pub enum Effect {
     /// `config.kill_confirm` is on; the modal must not describe a stale
     /// snapshot while the signal targets a different process.
     KillRequest(u16, Signal),
-    /// Kill the service currently listening on `port`.
-    Kill(u16, Signal),
+    /// Kill the service currently listening on `port`. `expected` is the
+    /// `(pid, starttime)` identity of the process the user *confirmed* in the
+    /// modal — `None` when no confirmation was shown (immediate kill). The
+    /// runner must refuse to signal if the current owner no longer matches:
+    /// the port can be re-bound while the modal is open, and killing the new
+    /// owner would kill a process the user never confirmed.
+    Kill(u16, Option<(i32, u64)>, Signal),
     CopyToClipboard(String),
     Refresh,
     /// Persist the current config (theme) to disk.
@@ -412,7 +429,10 @@ mod tests {
         assert!(app.pending_kill_service().is_some());
 
         let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(effects[0], Effect::Kill(3000, Signal::Term)));
+        assert!(matches!(
+            effects[0],
+            Effect::Kill(3000, Some((100, 7)), Signal::Term)
+        ));
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -431,7 +451,10 @@ mod tests {
         assert_eq!(app.mode, Mode::ConfirmKill(Signal::Kill));
 
         let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(effects[0], Effect::Kill(3000, Signal::Kill)));
+        assert!(matches!(
+            effects[0],
+            Effect::Kill(3000, Some((100, 7)), Signal::Kill)
+        ));
     }
 
     #[test]
@@ -455,7 +478,23 @@ mod tests {
         let mut app = app_with_services(1);
         app.config.kill_confirm = false;
         let effects = app.handle_key(key('x'));
-        assert!(matches!(effects[0], Effect::Kill(_, Signal::Term)));
+        // No confirmation was shown, so no identity is pinned: the runner
+        // kills whoever owns the port now.
+        assert!(matches!(effects[0], Effect::Kill(_, None, Signal::Term)));
+    }
+
+    /// An armed service with no readable process cannot be pinned: confirming
+    /// falls back to the unconfirmed semantic (kill whoever owns the port now)
+    /// rather than inventing an identity.
+    #[test]
+    fn test_confirmed_kill_without_process_is_not_pinned() {
+        let mut app = app_with_services(1);
+        let mut service = app.selected_service().unwrap().clone();
+        service.process = None;
+        app.arm_kill(service, Signal::Term);
+
+        let effects = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(effects[0], Effect::Kill(3000, None, Signal::Term)));
     }
 
     #[test]
