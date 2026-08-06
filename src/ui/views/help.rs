@@ -33,6 +33,7 @@ pub fn render(f: &mut Frame, area: Rect, degradations: &[Degradation], theme: &T
         Line::raw(""),
         Line::from(Span::styled("SEARCH & FILTER", header)),
         Line::raw("  /          search          Esc cancel"),
+        Line::raw("  scope:...  local, network, all, address"),
         Line::raw(""),
         Line::from(Span::styled("ACTIONS", header)),
         Line::raw("  x          kill (SIGTERM)"),

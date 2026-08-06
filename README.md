@@ -11,11 +11,11 @@ a container.
 *that's your `my-shop` Next.js dev server*.
 
 ```
-PORT   PROTO  PROJECT              FRAMEWORK          COMMAND            PID     CPU     MEM   UPTIME
- 3000  tcp*   my-shop              Next.js            next-server       48213   0.3%   214M    2h14m
- 5173  tcp    docs-site            Vite               node              51002   0.0%    98M      12m
- 8000  tcp    api                  FastAPI · Uvicorn   python3.13         7781   1.2%   120M      44m
- 5432  tcp    —                    —                  postgres           1234   0.1%    45M       3d
+PORT   PROTO  SCOPE    PROJECT              FRAMEWORK          COMMAND            PID     CPU     MEM   UPTIME
+ 3000  tcp*   local    my-shop              Next.js            next-server       48213   0.3%   214M    2h14m
+ 5173  tcp    all      docs-site            Vite               node              51002   0.0%    98M      12m
+ 8000  tcp    local    api                  FastAPI · Uvicorn   python3.13         7781   1.2%   120M      44m
+ 5432  tcp    address  —                    —                  postgres           1234   0.1%    45M       3d
 ```
 
 (`tcp*` means one service listening on both IPv4 and IPv6.)
@@ -124,6 +124,22 @@ your keypress is never the one that gets killed, and a port whose owner changed
 while you were deciding is refused instead of killing the new process. When
 several processes share one port (SO_REUSEPORT workers, containers), the
 confirmation shows the exact row you selected, never a sibling.
+
+### Search by bind scope
+
+The `SCOPE` column shows where a service is listening: `local` for loopback,
+`all` for every interface, and `address` for one non-loopback address. Use the
+search box to filter by scope, optionally with normal fuzzy search terms:
+
+```text
+scope:local
+scope:network vite
+scope:all
+scope:address
+```
+
+`scope:network` matches `all` and `address`. These bindings may be reachable
+from another machine, but firewall and routing rules determine actual access.
 
 When a scan is degraded (unreadable processes, sockets without an owner,
 container ports that may be hidden), the footer shows a `⚠N` count; `?` unfolds
