@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -94,6 +94,10 @@ struct Cli {
     /// Output completions for a shell
     #[arg(long, value_name = "SHELL")]
     completions: Option<clap_complete::Shell>,
+
+    /// Rebuild and reinstall portix from local source
+    #[arg(long, conflicts_with_all = ["port", "port_flag", "json", "once", "kill"])]
+    update: bool,
 }
 
 /// Accept both `3000` and the `:3000` form users type from muscle memory.
@@ -138,6 +142,10 @@ fn run() -> Result<i32> {
         let mut cmd = <Cli as clap::CommandFactory>::command();
         clap_complete::generate(shell, &mut cmd, "portix", &mut io::stdout());
         return Ok(exit::OK);
+    }
+
+    if cli.update {
+        return run_update();
     }
 
     let mut config = Config::load();
@@ -288,7 +296,17 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
             service.socket.proto_display(),
             format!("{}{}", scope_icon, service.socket.scope_label()),
             cell(&truncate_center(&service.project_display(), 20)),
-            cell(&truncate_center(&service.framework_display(), 18)),
+            {
+                let fw_str = service
+                    .framework
+                    .as_ref()
+                    .map(|fw| {
+                        let icon = fw.tech_icon().unwrap_or("");
+                        format!("{icon}{}", fw.display())
+                    })
+                    .unwrap_or_else(|| service.framework_display());
+                cell(&truncate_center(&fw_str, 18))
+            },
             cell(&truncate_center(&service.command_display(), 18)),
             process.map(|p| p.pid.to_string()).unwrap_or("—".into()),
             process
@@ -419,6 +437,45 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
     }
+}
+
+/// Rebuild and reinstall portix from the local source tree.
+///
+/// Finds `scripts/install.sh` relative to the source directory that was used
+/// at compile time (`CARGO_MANIFEST_DIR`). The script runs `cargo build
+/// --release` and overwrites the installed binary, so re-running `--update`
+/// after a `git pull` is the supported update path.
+///
+/// The source tree path is baked in at compile time. If the binary was
+/// cross-compiled or moved away from the source, `--update` reports the path
+/// it expected and exits with an error.
+fn run_update() -> Result<i32> {
+    // `option_env!` evaluates at compile time. When building from the project
+    // root (the normal `cargo build` / `scripts/install.sh` flow), this is
+    // always set. A binary built elsewhere (e.g., a distro package) gets None.
+    let manifest_dir = option_env!("CARGO_MANIFEST_DIR").ok_or_else(|| {
+        anyhow::anyhow!(
+            "source tree not found; --update only works when the binary was \
+             built from the project directory"
+        )
+    })?;
+
+    let script = std::path::Path::new(manifest_dir).join("scripts/install.sh");
+    if !script.exists() {
+        anyhow::bail!("install script not found: {}", script.display());
+    }
+
+    eprintln!("==> running {}", script.display());
+    let status = std::process::Command::new("bash")
+        .arg(&script)
+        .status()
+        .with_context(|| format!("failed to run {}", script.display()))?;
+
+    Ok(if status.success() {
+        exit::OK
+    } else {
+        exit::ERROR
+    })
 }
 
 fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<()> {
