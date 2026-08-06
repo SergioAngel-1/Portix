@@ -139,12 +139,6 @@ impl Query {
         // spelling and avoids the (impossible) unwrap.
         let mut buf = String::new();
         let _ = write!(buf, "{}", service.socket.port);
-        let _ = write!(
-            buf,
-            " {} {}",
-            service.socket.scope_label(),
-            service.socket.local_addr
-        );
 
         if let Some(ref project) = service.project {
             let _ = write!(buf, " {}", project.display_name());

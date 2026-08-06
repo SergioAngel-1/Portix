@@ -41,9 +41,7 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
             let proto = service.socket.proto_display();
             let scope = Cell::from(service.socket.scope_label()).style(
                 if service.socket.is_network_bound() {
-                    Style::default()
-                        .fg(theme.warn)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.ok)
                 },

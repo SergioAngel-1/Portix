@@ -272,16 +272,7 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
 
     println!(
         "{:<6} {:<6} {:<8} {:<20} {:<18} {:<18} {:>7} {:>7} {:>7} {:>8}",
-        "PORT",
-        "PROTO",
-        "SCOPE",
-        "PROJECT",
-        "FRAMEWORK",
-        "COMMAND",
-        "PID",
-        "CPU",
-        "MEM",
-        "UPTIME"
+        "PORT", "PROTO", "SCOPE", "PROJECT", "FRAMEWORK", "COMMAND", "PID", "CPU", "MEM", "UPTIME"
     );
 
     for service in snapshot.sorted_by_port() {
