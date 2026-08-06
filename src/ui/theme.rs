@@ -21,6 +21,8 @@ pub struct Theme {
     /// Foreground for cells in the selected row that need their own color
     /// to survive the selection background (e.g., PORT in accent).
     pub highlight: Color,
+    /// Background for alternating (even) table rows — zebra striping.
+    pub alt_row: Color,
 }
 
 impl Theme {
@@ -38,6 +40,7 @@ impl Theme {
             bg: Color::Black,
             selection: Color::Rgb(40, 44, 60),
             highlight: Color::White,
+            alt_row: Color::Rgb(22, 22, 30),
         }
     }
 
@@ -57,6 +60,7 @@ impl Theme {
             bg: Color::Black,
             selection: Color::DarkGray,
             highlight: Color::White,
+            alt_row: Color::Rgb(16, 16, 16),
         }
     }
 
@@ -121,6 +125,7 @@ impl Theme {
             Role::Text => self.text,
             Role::Selection => self.selection,
             Role::Highlight => self.highlight,
+            Role::AltRow => self.alt_row,
         }
     }
 }
@@ -138,6 +143,7 @@ pub enum Role {
     Text,
     Selection,
     Highlight,
+    AltRow,
 }
 
 #[cfg(test)]

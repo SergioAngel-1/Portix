@@ -41,12 +41,17 @@ impl ServiceId {
 
 impl Service {
     /// Get the display name for the PROJECT column.
+    ///
+    /// Java-style package names (`com.mycompany.backend`) are stripped to their
+    /// last segment (`backend`) so the meaningful part survives in the table's
+    /// limited width. This is a display-only transform; the raw name is still
+    /// available on the `Project` struct.
     pub fn project_display(&self) -> String {
         if let Some(ref container) = self.container {
             return container.display();
         }
         if let Some(ref project) = self.project {
-            return project.display_name().to_string();
+            return strip_package_prefix(project.display_name()).to_string();
         }
         "—".to_string()
     }
@@ -69,5 +74,28 @@ impl Service {
             Some(p) => p.binary_name().to_string(),
             None => "—".to_string(),
         }
+    }
+}
+
+/// Strip a Java/Android-style package prefix from a project name.
+///
+/// `com.mycompany.backend` → `backend`
+/// `io.github.user.my-app` → `my-app`
+///
+/// Only fires when there are 3+ dot-separated segments where every segment
+/// is purely alphanumeric (plus `-`), so normal names like `my-app` or
+/// `my-app.core` are untouched.
+fn strip_package_prefix(name: &str) -> &str {
+    let dot_count = name.chars().filter(|&c| c == '.').count();
+    if dot_count < 3 {
+        return name;
+    }
+    let is_package_like = name
+        .split('.')
+        .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    if is_package_like {
+        name.rsplit_once('.').map(|(_, tail)| tail).unwrap_or(name)
+    } else {
+        name
     }
 }

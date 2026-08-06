@@ -31,9 +31,19 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
             .add_modifier(Modifier::BOLD),
     );
 
+    // Compute column widths once; the framework column width drives the
+    // icon-vs-name decision in the row builder.
+    let content_width = area.width.saturating_sub(9); // Table spacing
+    let widths = column_widths(content_width);
+    let fw_col_width = match widths[4] {
+        Constraint::Length(n) => n,
+        _ => 16,
+    };
+
     let rows: Vec<Row> = services
         .iter()
-        .map(|service| {
+        .enumerate()
+        .map(|(idx, service)| {
             let process = service.process.as_ref();
 
             // Every one of these strings can carry attacker-controlled bytes
@@ -82,17 +92,46 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
             };
             let project = Cell::from(Span::styled(project_text, Style::default().fg(project_fg)));
 
-            // FRAMEWORK — ok (green) when detected, muted for dash.
-            let framework_text = cell(&truncate_center(&service.framework_display(), 16));
-            let framework_fg = if service.framework.is_some() {
-                theme.ok
+            // FRAMEWORK — tech icon + name, colored by confidence level.
+            // Responsive: when the column is too narrow for icon+name, show
+            // the icon alone (2 cols). The icon is recognizable on its own.
+            // When the column is < 3 cols, ratatui clips whatever we render.
+            let (framework_text, framework_fg) = if let Some(fw) = &service.framework {
+                let icon = fw.tech_icon().unwrap_or("");
+                let icon_width = unicode_width::UnicodeWidthStr::width(icon);
+                let name_max = (fw_col_width as usize).saturating_sub(icon_width);
+                let color = match fw.confidence {
+                    crate::model::FrameworkConfidence::High => theme.ok,
+                    crate::model::FrameworkConfidence::Medium => theme.warn,
+                    crate::model::FrameworkConfidence::Low => theme.muted,
+                };
+                if name_max >= 3 {
+                    // Enough room for icon + at least a 3-char name.
+                    let name = cell(&truncate_center(&fw.display(), name_max));
+                    (format!("{icon}{name}"), color)
+                } else if icon_width > 0 && fw_col_width as usize >= icon_width {
+                    // Too narrow for a name — show icon only.
+                    (icon.to_string(), color)
+                } else {
+                    // Very narrow: just the name, truncated.
+                    (
+                        cell(&truncate_center(&fw.display(), fw_col_width as usize)),
+                        color,
+                    )
+                }
             } else {
-                theme.muted
+                (
+                    cell(&truncate_center(
+                        &service.framework_display(),
+                        fw_col_width as usize,
+                    )),
+                    theme.muted,
+                )
             };
-            let framework = Cell::from(Span::styled(
+            let framework = Cell::from(Line::from(vec![Span::styled(
                 framework_text,
                 Style::default().fg(framework_fg),
-            ));
+            )]));
 
             // COMMAND — text color.
             let command = Cell::from(Span::styled(
@@ -140,28 +179,22 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
                 Style::default().fg(theme.muted),
             ));
 
+            // Zebra striping: even rows get a subtle background.
+            let row_bg = if idx % 2 == 0 {
+                Style::default()
+            } else {
+                Style::default().bg(theme.alt_row)
+            };
+
             Row::new(vec![
                 port, proto, scope, project, framework, command, pid, cpu, mem, uptime,
             ])
+            .style(row_bg)
         })
         .collect();
 
-    // Column widths calculated dynamically so every column gets viable space
-    // even at 80 columns, and PROJECT absorbs all extra width on wider terminals.
-    //
-    // Fixed columns (PORT, PROTO, SCOPE) use Length.
-    // Detail columns (FRAMEWORK..UPTIME) are capped at their Max values.
-    // PROJECT (Min) gets whatever remains.
-    //
-    // At  80 cols: PROJECT=17, FRAMEW=16, CMD=16, PID=7, CPU=7, MEM=6, UPTIME=7
-    // At 100 cols: PROJECT=37 (all extra goes to PROJECT)
-    // At 120 cols: PROJECT=57
-    //
-    // PORT gets Length(7) instead of Length(5) because the highlight symbol
-    // ("▸ ", 2 cols) is rendered inside the first column's area.
-    // Subtract Table's column_spacing (9 gaps × 1 col) from the available width.
+    // Column widths calculated dynamically (see column_widths fn).
     // The highlight symbol ("▸ ") is inside the first column's area, not extra.
-    let widths = column_widths(area.width.saturating_sub(9));
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -198,7 +231,7 @@ fn column_widths(content_width: u16) -> [Constraint; 10] {
     const FIXED: u16 = 21;
 
     // Max useful widths for the detail columns.
-    const FW_MAX: u16 = 16; // "◆ FastAPI · Uvicorn"
+    const FW_MAX: u16 = 18; // "▲ Next.js 15.1.0" / "⚡ FastAPI 0.110"
     const CMD_MAX: u16 = 16; // binary names
     const PID_MAX: u16 = 7; // up to 9999999
     const CPU_MAX: u16 = 7; // "100.0%"

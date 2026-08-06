@@ -52,15 +52,17 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
 
     // Framework (only when something was actually detected).
     if let Some(fw) = &service.framework {
+        let icon = fw.tech_icon().unwrap_or("");
+        let color = match fw.confidence {
+            crate::model::FrameworkConfidence::High => theme.ok,
+            crate::model::FrameworkConfidence::Medium => theme.warn,
+            crate::model::FrameworkConfidence::Low => theme.muted,
+        };
         lines.push(Line::from(vec![
-            Span::styled(
-                fw.confidence.glyph().to_string(),
-                Style::default().fg(theme.ok),
-            ),
-            Span::raw(" "),
+            Span::styled(icon.to_string(), Style::default().fg(color)),
             Span::styled(
                 cell(&fw.display_name),
-                Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::raw(version_span(fw.version.as_deref())),
             Span::styled(
@@ -174,11 +176,21 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
         Style::default().fg(theme.muted),
     )));
 
-    let title = format!(
-        " :{}  {} ",
-        service.socket.port,
-        service.socket.proto_display()
-    );
+    let title = {
+        let proto = service.socket.proto_display();
+        let project_hint = service
+            .project
+            .as_ref()
+            .map(|p| format!(" · {}", p.display_name()))
+            .or_else(|| {
+                service
+                    .framework
+                    .as_ref()
+                    .map(|fw| format!(" · {}", fw.display_name))
+            })
+            .unwrap_or_default();
+        format!(" :{} {}{} ", service.socket.port, proto, project_hint)
+    };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)

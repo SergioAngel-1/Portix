@@ -67,19 +67,50 @@ pub struct Framework {
 }
 
 impl Framework {
-    /// Get the display string for the framework column.
+    /// A technology-specific icon for this framework. Used in the table and
+    /// detail panel to make frameworks instantly recognizable at a glance.
+    ///
+    /// Returns `None` for runtimes that have no widely-recognized icon (e.g.,
+    /// `wsgi`, `node` as a bare runtime). The icon is a double-width emoji
+    /// rendered as a separate `Span` in the table — it is not embedded in
+    /// `display()` so the display string stays clean for truncation.
+    pub fn tech_icon(&self) -> Option<&'static str> {
+        match self.id.as_str() {
+            "nextjs" => Some("▲ "),
+            "vite" => Some("⚡ "),
+            "astro" => Some("🚀 "),
+            "nuxt" => Some("💚 "),
+            "remix" => Some("💿 "),
+            "nestjs" => Some("🐱 "),
+            "express" => Some("🚂 "),
+            "react" => Some("⚛ "),
+            "fastapi" => Some("⚡ "),
+            "django" => Some("🌿 "),
+            "flask" => Some("🧪 "),
+            "uvicorn" => Some("🦄 "),
+            "gunicorn" => Some("🦄 "),
+            "go" => Some("🐹 "),
+            "rust" => Some("🦀 "),
+            "python" => Some("🐍 "),
+            _ => None,
+        }
+    }
+
+    /// Clean display name for the framework — no icon, no confidence suffix.
+    ///
+    /// The icon is rendered as a separate styled `Span` by the table/detail
+    /// views. The confidence suffix was removed because glyphs like `·` or `?`
+    /// appended to the name were confused for technology indicators; confidence
+    /// is now communicated through color (ok / warn / muted) instead.
+    ///
+    /// `fw.version` is read from `package.json` dependencies — attacker-controlled
+    /// text that passes through `format::cell` in the renderers.
     pub fn display(&self) -> String {
         let version = self
             .version
             .as_ref()
             .map(|v| format!(" {v}"))
             .unwrap_or_default();
-        format!(
-            "{} {}{}{}",
-            self.confidence.glyph(),
-            self.display_name,
-            version,
-            self.confidence.suffix()
-        )
+        format!("{}{version}", self.display_name)
     }
 }
