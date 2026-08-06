@@ -18,6 +18,9 @@ pub struct Theme {
     pub bg: Color,
     /// Background of the selected table row.
     pub selection: Color,
+    /// Foreground for cells in the selected row that need their own color
+    /// to survive the selection background (e.g., PORT in accent).
+    pub highlight: Color,
 }
 
 impl Theme {
@@ -33,7 +36,8 @@ impl Theme {
             muted: Color::DarkGray,
             text: Color::White,
             bg: Color::Black,
-            selection: Color::DarkGray,
+            selection: Color::Rgb(40, 44, 60),
+            highlight: Color::White,
         }
     }
 
@@ -52,6 +56,7 @@ impl Theme {
             text: Color::White,
             bg: Color::Black,
             selection: Color::DarkGray,
+            highlight: Color::White,
         }
     }
 
@@ -115,6 +120,7 @@ impl Theme {
             Role::Muted => self.muted,
             Role::Text => self.text,
             Role::Selection => self.selection,
+            Role::Highlight => self.highlight,
         }
     }
 }
@@ -131,6 +137,7 @@ pub enum Role {
     Muted,
     Text,
     Selection,
+    Highlight,
 }
 
 #[cfg(test)]

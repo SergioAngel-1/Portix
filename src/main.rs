@@ -271,17 +271,22 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
     let snapshot = scan_with_cpu(engine);
 
     println!(
-        "{:<6} {:<6} {:<8} {:<20} {:<18} {:<18} {:>7} {:>7} {:>7} {:>8}",
+        "{:<6} {:<6} {:<10} {:<20} {:<18} {:<18} {:>7} {:>7} {:>7} {:>8}",
         "PORT", "PROTO", "SCOPE", "PROJECT", "FRAMEWORK", "COMMAND", "PID", "CPU", "MEM", "UPTIME"
     );
 
     for service in snapshot.sorted_by_port() {
         let process = service.process.as_ref();
+        let scope_icon = match service.socket.bind_scope {
+            portix_lib::model::BindScope::Loopback => "● ",
+            portix_lib::model::BindScope::AllInterfaces => "○ ",
+            portix_lib::model::BindScope::Specific(_) => "◆ ",
+        };
         println!(
-            "{:>5}  {:<6} {:<8} {:<20} {:<18} {:<18} {:>7} {:>7} {:>7} {:>8}",
+            "{:>5}  {:<6} {:<10} {:<20} {:<18} {:<18} {:>7} {:>7} {:>7} {:>8}",
             service.socket.port,
             service.socket.proto_display(),
-            service.socket.scope_label(),
+            format!("{}{}", scope_icon, service.socket.scope_label()),
             cell(&truncate_center(&service.project_display(), 20)),
             cell(&truncate_center(&service.framework_display(), 18)),
             cell(&truncate_center(&service.command_display(), 18)),
