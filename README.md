@@ -11,14 +11,15 @@ a container.
 *that's your `my-shop` Next.js dev server*.
 
 ```
-PORT   PROTO  SCOPE    PROJECT              FRAMEWORK          COMMAND            PID     CPU     MEM   UPTIME
- 3000  tcp*   local    my-shop              Next.js            next-server       48213   0.3%   214M    2h14m
- 5173  tcp    all      docs-site            Vite               node              51002   0.0%    98M      12m
- 8000  tcp    local    api                  FastAPI · Uvicorn   python3.13         7781   1.2%   120M      44m
- 5432  tcp    address  —                    —                  postgres           1234   0.1%    45M       3d
+PORT   PROTO  SCOPE      PROJECT              FRAMEWORK          COMMAND            PID     CPU     MEM   UPTIME
+ 3000  tcp*   ● local    my-shop              ▲ Next.js          next-server       48213   0.3%   214M    2h14m
+ 5173  tcp    ○ all      docs-site            ⚡ Vite             node              51002   0.0%    98M      12m
+ 8000  tcp    ● local    api                  ⚡ FastAPI           python3.13         7781   1.2%   120M      44m
+ 5432  tcp    ◆ address  —                    —                  postgres           1234   0.1%    45M       3d
 ```
 
-(`tcp*` means one service listening on both IPv4 and IPv6.)
+(`tcp*` means one service listening on both IPv4 and IPv6. Scope icons:
+`●` loopback, `○` all interfaces, `◆` specific address.)
 
 ## What it does
 
@@ -29,8 +30,9 @@ PORT   PROTO  SCOPE    PROJECT              FRAMEWORK          COMMAND          
   the nearest manifest (`package.json`, `Cargo.toml`, `pyproject.toml`,
   `go.mod`, …) and reads the project name, package manager, and workspace.
 - **The framework** — from the command, the manifest dependencies, and config
-  files. Recognizes Next.js, Vite, Astro, Nuxt, Remix, NestJS, Express, React,
-  FastAPI, Django, Flask, Uvicorn, Gunicorn, Go and Rust.
+  files. Recognizes Next.js (`▲`), Vite (`⚡`), Astro (`🚀`), Nuxt (`💚`),
+  Remix (`💿`), NestJS (`🐱`), Express (`🚂`), React (`⚛`), FastAPI (`⚡`),
+  Django (`🌿`), Flask (`🧪`), Go (`🐹`), Rust (`🦀`), and more.
 - **Containers** — flags processes running under Docker, Podman, containerd,
   or systemd-nspawn. A port published through Docker's userland proxy is
   attributed to the destination container (showing its IP) instead of the
@@ -77,19 +79,19 @@ Installing is a **local** operation — the CI pipeline only verifies the code,
 nothing deploys from GitHub (the workflow file is itself local-only, like the PRD). To update the binary on this machine, rebuild and overwrite it:
 
 ```bash
-./scripts/install.sh                     # release build -> ~/.local/bin/portix
-./scripts/install.sh --sudo              # -> /usr/local/bin (prompts for password)
+portix --update                        # rebuild + reinstall to ~/.local/bin
+# or manually:
+./scripts/install.sh                   # release build -> ~/.local/bin/portix
+./scripts/install.sh --sudo            # -> /usr/local/bin (prompts for password)
 ./scripts/install.sh --bin-dir "$HOME/.cargo/bin"
-./scripts/install.sh --profile dev       # debug build (faster compile)
-BIN_DIR=/opt/portix ./scripts/install.sh # same settings as env vars
+./scripts/install.sh --profile dev     # debug build (faster compile)
+BIN_DIR=/opt/portix ./scripts/install.sh  # same settings as env vars
 ```
 
-The script always overwrites the destination, so re-running it after a
-`git pull` is exactly "update portix". Equivalently, Cargo's own installer:
-
-```bash
-cargo install --path . --force           # -> ~/.cargo/bin/portix
-```
+The `--update` flag runs `scripts/install.sh` from the source tree that was
+used to build the current binary. The source path is baked in at compile time
+via `CARGO_MANIFEST_DIR`, so it works after `git pull` without needing to
+remember the script location.
 
 ## Using the app (TUI)
 
@@ -125,10 +127,31 @@ while you were deciding is refused instead of killing the new process. When
 several processes share one port (SO_REUSEPORT workers, containers), the
 confirmation shows the exact row you selected, never a sibling.
 
+### Visual design
+
+The table uses semantic colors to guide the eye:
+
+- **PORT** is accent-colored and bold — the primary identifier.
+- **SCOPE** shows icons: `●` loopback (green), `○` all interfaces (yellow),
+  `◆` specific address (yellow+bold).
+- **FRAMEWORK** shows technology icons (`▲` Next.js, `⚡` Vite/FastAPI,
+  `🚀` Astro, `🐹` Go, `🦀` Rust, …) and is color-coded by detection
+  confidence: green for high, yellow for medium, gray for low.
+- **CPU** turns yellow above 50% and red above 90%.
+- **Rows** are zebra-striped for readability in long lists.
+- The **detail panel** (`i` / `Enter`) shows full info with the same icons
+  and colors, and its title includes the project name.
+- The **theme picker** (`t`) previews themes live; `Enter` saves, `Esc`
+  reverts.
+
+The table adapts to terminal width — all columns stay visible from 80
+columns up, with PROJECT absorbing extra space on wider terminals. On very
+narrow terminals the framework column shows just the technology icon.
+
 ### Search by bind scope
 
-The `SCOPE` column shows where a service is listening: `local` for loopback,
-`all` for every interface, and `address` for one non-loopback address. Use the
+The `SCOPE` column shows where a service is listening: `● local` for loopback,
+`○ all` for every interface, and `◆ address` for one non-loopback address. Use the
 search box to filter by scope, optionally with normal fuzzy search terms:
 
 ```text
@@ -152,7 +175,7 @@ Portix is also a normal CLI, handy in scripts and one-liners.
 ```bash
 # What's on port 3000? (accepts 3000, :3000, or --port 3000)
 portix 3000
-# → :3000 my-shop Next.js pid 48213
+# → :3000 my-shop ▲ Next.js pid 48213
 # Prints nothing and exits with code 3 if the port is free — so you can do:
 portix :3000 || pnpm dev
 
@@ -184,6 +207,7 @@ listening on that port. JSON output is wrapped in `schema_version` (currently
 | `--interval <MS>`    | Refresh interval for the TUI                        |
 | `--system-ports`     | Include ports below 1024                            |
 | `--no-color`         | Disable colors (the `NO_COLOR` env var does too)    |
+| `--update`           | Rebuild and reinstall from local source             |
 | `--completions <SH>` | Print shell completions (`bash`, `zsh`, `fish`, …)  |
 | `--proc-root <PATH>` | Read `/proc` from an alternative root (tests, containers) |
 
