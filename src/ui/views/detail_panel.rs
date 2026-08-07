@@ -105,7 +105,7 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
     // Process.
     lines.push(section("PROCESS"));
     if let Some(p) = &service.process {
-        lines.push(kv("Command", cell(&p.command_display())));
+        lines.push(kv("Command", cell(&service.command_display())));
         lines.push(kv("PID", p.pid.to_string()));
         lines.push(kv("PPID", p.ppid.to_string()));
         lines.push(kv("User", cell(p.user.as_deref().unwrap_or("—"))));
@@ -154,6 +154,9 @@ pub fn render(f: &mut Frame, area: Rect, service: Option<&Service>, theme: &Them
         }
         if let Some(compose) = &c.compose_project {
             lines.push(kv("Compose", cell(compose)));
+        }
+        if let Some(command) = &c.command {
+            lines.push(kv("Container command", cell(command)));
         }
         lines.push(blank());
     }

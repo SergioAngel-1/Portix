@@ -1,19 +1,171 @@
-use crate::model::{Container, Service};
-use std::path::Path;
+use crate::model::{Container, Runtime, Service};
+use serde::Deserialize;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 
-/// Parse the two `docker-proxy` flags we care about from a cmdline.
-///
-/// Canonical form seen in the wild:
-/// `/usr/bin/docker-proxy
-///  -proto tcp
-///  -host-ip 0.0.0.0
-///  -host-port 5432
-///  -container-ip 172.17.0.2
-///  -container-port 5432`
-///
-/// We do not depend on every flag being present; we extract what we can and
-/// leave the rest blank. Only `-container-ip` is consumed today — the socket's
-/// host port is what the UI displays, so `-container-port` is not needed.
+/// Docker Desktop's published-port metadata, obtained from its local Docker
+/// Engine API. The API is optional: if the socket is absent, inaccessible, or
+/// returns malformed data, the normal `/proc` row is preserved.
+#[derive(Debug, Clone, Default)]
+pub struct DockerDesktopData {
+    pub containers: Vec<DockerDesktopContainer>,
+    /// Host process name used when `/proc` cannot resolve the owner.
+    pub host_process: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DockerDesktopContainer {
+    pub id: String,
+    pub name: Option<String>,
+    pub compose_project: Option<String>,
+    pub command: Option<String>,
+    pub published_ports: Vec<DockerDesktopPublishedPort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerDesktopPublishedPort {
+    pub host_ip: Option<String>,
+    pub host_port: u16,
+    pub container_port: u16,
+    pub protocol: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerApiContainer {
+    #[serde(rename = "Id")]
+    id: String,
+    #[serde(rename = "Names", default)]
+    names: Vec<String>,
+    #[serde(rename = "Command", default)]
+    command: Option<String>,
+    #[serde(rename = "Labels", default)]
+    labels: std::collections::HashMap<String, String>,
+    #[serde(rename = "Ports", default)]
+    ports: Vec<DockerApiPort>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerApiPort {
+    #[serde(rename = "IP")]
+    ip: Option<String>,
+    #[serde(rename = "PrivatePort")]
+    private_port: u16,
+    #[serde(rename = "PublicPort")]
+    public_port: Option<u16>,
+    #[serde(rename = "Type")]
+    protocol: String,
+}
+
+/// Read Docker Desktop's local API endpoint and list running containers with
+/// published ports. This uses only a Unix socket; it never opens a TCP socket.
+pub fn read_docker_desktop(socket: Option<&Path>) -> Option<DockerDesktopData> {
+    let socket = socket
+        .map(PathBuf::from)
+        .or_else(default_docker_desktop_socket)?;
+    let mut stream = UnixStream::connect(socket).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_millis(250)))
+        .ok()?;
+
+    let request = b"GET /v1.41/containers/json?all=0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    stream.write_all(request).ok()?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).ok()?;
+    parse_container_list_response(&response)
+}
+
+fn parse_container_list_response(response: &[u8]) -> Option<DockerDesktopData> {
+    let body = http_body(response)?;
+    let decoded = decode_chunked_body(body);
+    let api: Vec<DockerApiContainer> = match decoded {
+        Some(decoded) => serde_json::from_slice(&decoded).ok()?,
+        None => serde_json::from_slice(body).ok()?,
+    };
+
+    Some(DockerDesktopData {
+        containers: api
+            .into_iter()
+            .map(|container| DockerDesktopContainer {
+                id: container.id.chars().take(12).collect(),
+                name: container
+                    .names
+                    .first()
+                    .map(|name| name.trim_start_matches('/').to_string()),
+                compose_project: container.labels.get("com.docker.compose.project").cloned(),
+                command: container.command,
+                published_ports: container
+                    .ports
+                    .into_iter()
+                    .filter_map(|port| {
+                        Some(DockerDesktopPublishedPort {
+                            host_ip: port.ip.filter(|ip| !ip.is_empty()),
+                            host_port: port.public_port?,
+                            container_port: port.private_port,
+                            protocol: port.protocol,
+                        })
+                    })
+                    .collect(),
+            })
+            .collect(),
+        host_process: "com.docker.backend".to_string(),
+    })
+}
+
+fn http_body(response: &[u8]) -> Option<&[u8]> {
+    response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| &response[index + 4..])
+        .or_else(|| {
+            response
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|index| &response[index + 2..])
+        })
+}
+
+fn decode_chunked_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut cursor = 0;
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = body
+            .get(cursor..)?
+            .windows(2)
+            .position(|window| window == b"\r\n")?;
+        let size = usize::from_str_radix(
+            std::str::from_utf8(&body[cursor..cursor + line_end])
+                .ok()?
+                .trim(),
+            16,
+        )
+        .ok()?;
+        cursor += line_end + 2;
+        if size == 0 {
+            return Some(decoded);
+        }
+        let chunk = body.get(cursor..cursor + size)?;
+        decoded.extend_from_slice(chunk);
+        cursor += size;
+        if body.get(cursor..cursor + 2)? != b"\r\n" {
+            return None;
+        }
+        cursor += 2;
+    }
+}
+
+fn default_docker_desktop_socket() -> Option<PathBuf> {
+    if let Some(host) = std::env::var_os("DOCKER_HOST") {
+        let host = host.to_string_lossy();
+        return host.strip_prefix("unix://").map(PathBuf::from);
+    }
+    crate::core::config::display_home().map(|home| home.join(".docker/desktop/docker.sock"))
+}
+
+/// Parse the legacy `docker-proxy` command line.
 #[derive(Debug, Clone, Default)]
 pub struct DockerProxyInfo {
     pub container_ip: Option<String>,
@@ -29,57 +181,81 @@ impl DockerProxyInfo {
         let mut info = Self::default();
         let args = cmdline.iter().map(String::as_str).collect::<Vec<_>>();
         for (i, arg) in args.iter().enumerate() {
-            let mut rest = *arg;
-            // docker-proxy flags may be single-dash (`-proto`) or double-dash
-            // (`--container-ip`); strip all leading dashes so the name matches
-            // regardless of how many the binary emits.
-            rest = rest.trim_start_matches('-');
-
+            let rest = arg.trim_start_matches('-');
             if rest == "container-ip"
                 || rest.starts_with("container-ip=")
                 || rest.starts_with("container-ip ")
             {
-                // The value is the `=`/space form, or the next argument. A
-                // flag without a value must not capture the *next flag* as its
-                // value (`-container-ip -proto tcp` would otherwise read
-                // "-proto"); anything unusable degrades to "unknown".
                 let value = rest
                     .strip_prefix("container-ip=")
-                    .or_else(|| rest.strip_prefix("container-ip ").map(|s| s.trim()))
+                    .or_else(|| rest.strip_prefix("container-ip ").map(str::trim))
                     .or_else(|| args.get(i + 1).copied())
-                    .filter(|v| !v.is_empty() && !v.starts_with('-'))
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
                     .unwrap_or("unknown");
                 info.container_ip = Some(value.to_string());
             }
         }
 
-        if info.container_ip.is_none() {
-            None
-        } else {
-            Some(info)
-        }
+        info.container_ip.as_ref()?;
+        Some(info)
     }
 }
 
-/// Best-effort container attribution for a `docker-proxy` service.
-///
-/// We do not call out to the Docker API. Instead, we synthesize a container
-/// record from the cmdline metadata we already have.
+/// Enrich a row from Docker Desktop's published-port table. The socket port is
+/// the host port visible in `/proc/net`; the API supplies the destination
+/// container, name and Compose project.
+pub fn rewrite_docker_desktop(service: &mut Service, data: &DockerDesktopData) {
+    let protocol = match service.socket.protocol {
+        crate::model::Protocol::Tcp | crate::model::Protocol::Tcp6 => "tcp",
+        crate::model::Protocol::Udp | crate::model::Protocol::Udp6 => "udp",
+    };
+    let host_ip = service.socket.local_addr.to_string();
+
+    let Some(container) = data.containers.iter().find(|container| {
+        container.published_ports.iter().any(|port| {
+            if port.host_port != service.socket.port || port.protocol != protocol {
+                return false;
+            }
+            port.host_ip
+                .as_deref()
+                .map_or(true, |ip| ip == "0.0.0.0" || ip == "::" || ip == host_ip)
+        })
+    }) else {
+        return;
+    };
+
+    service.container = Some(Container {
+        runtime: Runtime::Docker,
+        id: container.id.clone(),
+        name: container.name.clone(),
+        compose_project: container.compose_project.clone(),
+        command: container.command.clone(),
+        host_process: Some(data.host_process.clone()),
+    });
+    // The container replaces the host-side process row semantically. Its name
+    // is displayed in PROJECT, while Docker's runtime marker is displayed in
+    // FRAMEWORK; the host process is retained separately for COMMAND.
+    service.project = None;
+    service.framework = None;
+    service.docker_proxy_rewritten = true;
+}
+
+/// Best-effort rewrite for the legacy docker-proxy command line.
 pub fn rewrite_docker_proxy(service: &mut Service) {
     let Some(process) = service.process.as_ref() else {
         return;
     };
-
     let Some(info) = DockerProxyInfo::from_cmdline(&process.cmdline) else {
         return;
     };
-
-    let container = Some(Container::new(
-        crate::model::Runtime::Docker,
-        info.container_ip.unwrap_or_else(|| "unknown".to_string()),
-    ));
-
-    service.container = container;
+    service.container = Some(Container {
+        runtime: Runtime::Docker,
+        id: info.container_ip.unwrap_or_else(|| "unknown".to_string()),
+        name: None,
+        compose_project: None,
+        command: None,
+        host_process: None,
+    });
     service.project = None;
     service.framework = None;
     service.docker_proxy_rewritten = true;
@@ -88,31 +264,34 @@ pub fn rewrite_docker_proxy(service: &mut Service) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Process, ProcessState, Protocol, Socket, TcpState};
+    use crate::model::{BindScope, Process, ProcessState, Protocol, ServiceId, Socket, TcpState};
 
-    fn docker_proxy_service(cmdline: &[&str]) -> Service {
+    fn service(port: u16, protocol: Protocol) -> Service {
         let socket = Socket {
-            protocol: Protocol::Tcp,
-            local_addr: std::net::Ipv4Addr::LOCALHOST.into(),
-            port: 5432,
+            protocol,
+            local_addr: std::net::Ipv4Addr::UNSPECIFIED.into(),
+            port,
             state: TcpState::Listen,
-            bind_scope: crate::model::BindScope::AllInterfaces,
+            bind_scope: BindScope::AllInterfaces,
             inode: 1,
             uid: 1000,
             dual_stack: false,
         };
         Service {
-            id: crate::model::ServiceId::from_socket(&socket),
+            id: ServiceId::from_socket(&socket),
             socket,
             process: Some(Process {
-                pid: 1,
-                ppid: 0,
-                name: "docker-proxy".into(),
-                cmdline: cmdline.iter().map(|s| s.to_string()).collect(),
-                exe: None,
+                pid: 2324,
+                ppid: 1,
+                name: "com.docker.back".into(),
+                cmdline: vec![
+                    "/opt/docker-desktop/bin/com.docker.backend".into(),
+                    "services".into(),
+                ],
+                exe: Some("/opt/docker-desktop/bin/com.docker.backend".into()),
                 cwd: None,
-                uid: None,
-                user: None,
+                uid: Some(1000),
+                user: Some("sergi".into()),
                 started_at: None,
                 starttime_jiffies: 1,
                 cpu_jiffies: 0,
@@ -121,9 +300,9 @@ mod tests {
                 threads: 1,
             }),
             project: Some(crate::model::Project {
-                root: std::path::PathBuf::from("/usr/bin"),
+                root: PathBuf::from("/tmp/project"),
                 workspace_root: None,
-                name: "docker-proxy".into(),
+                name: "wrong-project".into(),
                 technical_name: None,
                 language: None,
                 package_manager: None,
@@ -134,113 +313,87 @@ mod tests {
         }
     }
 
+    fn data() -> DockerDesktopData {
+        DockerDesktopData {
+            containers: vec![DockerDesktopContainer {
+                id: "b27bd000cd6f".into(),
+                name: Some("hwe_wordpress".into()),
+                compose_project: Some("siu-tutuava".into()),
+                command: Some("docker-entrypoint.sh apache2-foreground".into()),
+                published_ports: vec![DockerDesktopPublishedPort {
+                    host_ip: Some("0.0.0.0".into()),
+                    host_port: 8081,
+                    container_port: 80,
+                    protocol: "tcp".into(),
+                }],
+            }],
+            host_process: "com.docker.backend".into(),
+        }
+    }
+
     #[test]
-    fn test_docker_proxy_rewrite_attaches_container() {
-        let mut service = docker_proxy_service(&[
-            "/usr/bin/docker-proxy",
-            "-proto tcp",
-            "-host-ip 0.0.0.0",
-            "-host-port 5432",
-            "-container-ip 172.17.0.2",
-            "-container-port 5432",
-        ]);
-
-        rewrite_docker_proxy(&mut service);
-
+    fn docker_desktop_rewrites_backend_row_from_published_port_data() {
+        let mut service = service(8081, Protocol::Tcp);
+        rewrite_docker_desktop(&mut service, &data());
         assert!(service.docker_proxy_rewritten);
         assert!(service.project.is_none());
-        assert!(service.framework.is_none());
+        assert_eq!(service.container.as_ref().unwrap().id, "b27bd000cd6f");
         assert_eq!(
-            service.container.as_ref().unwrap().runtime,
-            crate::model::Runtime::Docker
+            service.container.as_ref().unwrap().name.as_deref(),
+            Some("hwe_wordpress")
         );
-        assert_eq!(service.container.as_ref().unwrap().id, "172.17.0.2");
-        assert_eq!(service.socket.port, 5432);
+        assert_eq!(
+            service
+                .container
+                .as_ref()
+                .unwrap()
+                .compose_project
+                .as_deref(),
+            Some("siu-tutuava")
+        );
+        assert_eq!(service.project_display(), "hwe_wordpress");
+        assert_eq!(service.runtime_display().as_deref(), Some("🐳 Docker"));
+        assert_eq!(service.command_display(), "com.docker.backend");
+        assert_eq!(
+            service.container.as_ref().unwrap().command.as_deref(),
+            Some("docker-entrypoint.sh apache2-foreground")
+        );
     }
 
     #[test]
-    fn test_non_docker_proxy_is_ignored() {
-        let mut service = docker_proxy_service(&["/usr/bin/node", "server.js"]);
-        rewrite_docker_proxy(&mut service);
+    fn docker_desktop_does_not_match_unpublished_or_wrong_protocol_ports() {
+        let mut service = service(5433, Protocol::Udp);
+        rewrite_docker_desktop(&mut service, &data());
         assert!(!service.docker_proxy_rewritten);
-        assert!(service.project.is_some());
+        assert!(service.container.is_none());
     }
 
     #[test]
-    fn test_docker_proxy_double_dash_equals_form() {
-        let mut service = docker_proxy_service(&[
-            "/usr/bin/docker-proxy",
-            "--proto",
-            "tcp",
-            "--host-ip=0.0.0.0",
-            "--host-port=5432",
-            "--container-ip=172.17.0.2",
-            "--container-port=5432",
-        ]);
-        rewrite_docker_proxy(&mut service);
-        assert!(service.docker_proxy_rewritten);
-        assert_eq!(service.container.as_ref().unwrap().id, "172.17.0.2");
+    fn docker_desktop_parser_accepts_real_http_response_headers() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n[{\"Id\":\"abcdef0123456789\",\"Names\":[\"/db\"],\"Labels\":{},\"Ports\":[{\"IP\":\"0.0.0.0\",\"PrivatePort\":5432,\"PublicPort\":5433,\"Type\":\"tcp\"}]}]";
+        let parsed = parse_container_list_response(response).expect("valid Docker response");
+        assert_eq!(parsed.containers[0].id, "abcdef012345");
+        assert_eq!(parsed.containers[0].published_ports[0].host_port, 5433);
+    }
+
+    #[test]
+    fn docker_desktop_parser_decodes_chunked_response() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n11\r\n[{\"Id\":\"abcdef012\r\n24\r\n3456789\",\"Names\":[\"/db\"],\"Labels\":{}\r\n4F\r\n,\"Ports\":[{\"IP\":\"0.0.0.0\",\"PrivatePort\":5432,\"PublicPort\":5433,\"Type\":\"tcp\"}]}]\r\n0\r\n\r\n";
+        assert!(parse_container_list_response(response).is_some());
+    }
+
+    #[test]
+    fn legacy_docker_proxy_parser_still_handles_container_ip() {
+        let cmdline = vec![
+            "/usr/bin/docker-proxy".into(),
+            "--container-ip=172.17.0.2".into(),
+        ];
         assert_eq!(
-            service.container.as_ref().unwrap().runtime,
-            crate::model::Runtime::Docker
+            DockerProxyInfo::from_cmdline(&cmdline)
+                .unwrap()
+                .container_ip
+                .as_deref(),
+            Some("172.17.0.2")
         );
-    }
-
-    #[test]
-    fn test_docker_proxy_double_dash_separated_form() {
-        let mut service = docker_proxy_service(&[
-            "/usr/bin/docker-proxy",
-            "--proto",
-            "tcp",
-            "--host-ip",
-            "0.0.0.0",
-            "--host-port",
-            "5432",
-            "--container-ip",
-            "172.17.0.2",
-            "--container-port",
-            "5432",
-        ]);
-        rewrite_docker_proxy(&mut service);
-        assert!(service.docker_proxy_rewritten);
-        assert_eq!(service.container.as_ref().unwrap().id, "172.17.0.2");
-    }
-
-    #[test]
-    fn test_docker_proxy_without_process_is_ignored() {
-        let mut service = docker_proxy_service(&["/usr/bin/docker-proxy"]);
-        service.process = None;
-        rewrite_docker_proxy(&mut service);
-        assert!(!service.docker_proxy_rewritten);
-        assert!(service.project.is_some());
-    }
-
-    /// `-container-ip` with no value must not capture the *next flag* as its
-    /// value: the old code read "-proto" as the container IP and rendered
-    /// `🐳 -proto` in the UI.
-    #[test]
-    fn test_docker_proxy_flag_without_value_does_not_capture_next_flag() {
-        let mut service =
-            docker_proxy_service(&["/usr/bin/docker-proxy", "-container-ip", "-proto", "tcp"]);
-
-        rewrite_docker_proxy(&mut service);
-
-        assert!(service.docker_proxy_rewritten);
-        assert_eq!(
-            service.container.as_ref().unwrap().id,
-            "unknown",
-            "a flag is not a value; degrade to unknown"
-        );
-    }
-
-    /// An empty `=` value is equally unusable.
-    #[test]
-    fn test_docker_proxy_empty_equals_value_is_unknown() {
-        let mut service =
-            docker_proxy_service(&["/usr/bin/docker-proxy", "--container-ip=", "--proto", "tcp"]);
-
-        rewrite_docker_proxy(&mut service);
-
-        assert_eq!(service.container.as_ref().unwrap().id, "unknown");
     }
 }

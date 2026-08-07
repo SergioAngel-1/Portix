@@ -1,6 +1,9 @@
 use crate::cache::store::CpuSample;
 use crate::cache::CacheStore;
-use crate::core::docker_proxy::{rewrite_docker_proxy, DockerProxyInfo};
+use crate::core::docker_proxy::{
+    read_docker_desktop, rewrite_docker_desktop, rewrite_docker_proxy, DockerDesktopData,
+    DockerProxyInfo,
+};
 use crate::core::Config;
 use crate::detect::project::{detect_project, manifest_mtime};
 use crate::detect::DetectorRegistry;
@@ -119,6 +122,11 @@ impl Engine {
             Err(e) => return Arc::new(self.empty_snapshot(start, e)),
         };
 
+        // Docker Desktop exposes the published-port mapping through its local
+        // Unix socket. It is optional and best-effort: a missing/blocked API
+        // must never prevent the /proc scan from producing a snapshot.
+        let docker_desktop: Option<DockerDesktopData> = read_docker_desktop(None);
+
         let sockets: Vec<Socket> = if apply_filters {
             sockets
                 .into_iter()
@@ -129,7 +137,13 @@ impl Engine {
         };
 
         let interest: HashSet<u64> = sockets.iter().map(|s| s.inode).collect();
-        let inode_map = self.platform.build_inode_map(&interest).unwrap_or_default();
+        let (inode_map, inode_map_error) = match self.platform.build_inode_map(&interest) {
+            Ok(map) => (map, None),
+            Err(error) => (HashMap::new(), Some(format!("{error:#}"))),
+        };
+        if let Some(error) = inode_map_error {
+            degradations.push(Degradation::InodeMapFailed(error));
+        }
 
         let total_jiffies = self.platform.total_jiffies();
         let mut live = HashSet::new();
@@ -139,6 +153,7 @@ impl Engine {
         // (another user's process, or it exited mid-scan). Counted per distinct
         // PID via the `seen` memo below, not per socket.
         let mut partial_reads = 0usize;
+        let mut disappeared = 0usize;
 
         // One process can own several sockets (dual-stack, or tcp+udp like
         // kdeconnectd). Resolve it once per scan: reading /proc twice is waste,
@@ -166,13 +181,22 @@ impl Engine {
                     Some(cached) => cached.clone(),
                     None => {
                         let resolved = self.resolve_process(pid, total_jiffies, &mut live);
-                        // A known PID we could not read is a partial read, not an
-                        // unattributed socket: the difference is worth reporting.
-                        if resolved.is_none() {
-                            partial_reads += 1;
+                        // A PID found in the reverse map may disappear before metadata is read.
+                        // Preserve that distinction in the degradation report instead
+                        // of guessing permission.
+                        if let Err(error) = &resolved {
+                            if error
+                                .chain()
+                                .any(|cause| cause.to_string().contains("process disappeared"))
+                            {
+                                disappeared += 1;
+                            } else {
+                                partial_reads += 1;
+                            }
                         }
-                        seen.insert(pid, resolved.clone());
-                        resolved
+                        let process = resolved.ok();
+                        seen.insert(pid, process.clone());
+                        process
                     }
                 },
                 None => {
@@ -226,6 +250,9 @@ impl Engine {
                 docker_proxy_rewritten: false,
             };
             rewrite_docker_proxy(&mut service);
+            if let Some(data) = docker_desktop.as_ref() {
+                rewrite_docker_desktop(&mut service, data);
+            }
             services.push(service);
         }
 
@@ -239,7 +266,9 @@ impl Engine {
         if partial_reads > 0 {
             degradations.push(Degradation::ProcessesPartialRead(partial_reads));
         }
-
+        if disappeared > 0 {
+            degradations.push(Degradation::ProcessesDisappeared(disappeared));
+        }
         self.cache.retain_live(&live);
 
         let mut services = merge_dual_stack(services);
@@ -302,10 +331,10 @@ impl Engine {
         pid: i32,
         total_jiffies: Option<u64>,
         live: &mut HashSet<ProcessKey>,
-    ) -> Option<Process> {
+    ) -> Result<Process> {
         // A process can exit between the readdir that found it and this read.
         // That is the normal case, not an error.
-        let mut process = self.platform.process_metadata(pid).ok()?;
+        let mut process = self.platform.process_metadata(pid)?;
         let key = process.key();
         live.insert(key);
 
@@ -346,7 +375,7 @@ impl Engine {
             }
         }
 
-        Some(process)
+        Ok(process)
     }
 
     fn cpu_scale_factor(&self) -> usize {

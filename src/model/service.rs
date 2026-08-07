@@ -48,7 +48,15 @@ impl Service {
     /// available on the `Project` struct.
     pub fn project_display(&self) -> String {
         if let Some(ref container) = self.container {
-            return container.display();
+            // PROJECT keeps the human-facing container name used by the
+            // launcher (for example `hwe_db`). The Compose project remains
+            // available in the detail panel and JSON metadata.
+            return container
+                .name
+                .as_deref()
+                .or(container.compose_project.as_deref())
+                .unwrap_or(&container.id)
+                .to_string();
         }
         if let Some(ref project) = self.project {
             return strip_package_prefix(project.display_name()).to_string();
@@ -68,11 +76,28 @@ impl Service {
         }
     }
 
+    /// Display value for the framework column's runtime/container marker.
+    /// Docker is infrastructure metadata, so it is intentionally rendered
+    /// here rather than replacing the project name.
+    pub fn runtime_display(&self) -> Option<String> {
+        self.container.as_ref().map(|container| {
+            format!(
+                "{} {}",
+                container.runtime.glyph(),
+                container.runtime.display()
+            )
+        })
+    }
+
     /// Get the display name for the COMMAND column.
     pub fn command_display(&self) -> String {
         match &self.process {
             Some(p) => p.binary_name().to_string(),
-            None => "—".to_string(),
+            None => self
+                .container
+                .as_ref()
+                .and_then(|container| container.host_process.clone())
+                .unwrap_or_else(|| "—".to_string()),
         }
     }
 }

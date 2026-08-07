@@ -85,18 +85,19 @@ pub fn render(f: &mut Frame, area: Rect, services: &[&Service], selected: usize,
 
             // PROJECT — text normally, container color when in a container.
             let project_text = cell(&truncate_center(&service.project_display(), 20));
-            let project_fg = if service.container.is_some() {
-                theme.container
-            } else {
-                theme.text
-            };
+            let project_fg = theme.text;
             let project = Cell::from(Span::styled(project_text, Style::default().fg(project_fg)));
 
             // FRAMEWORK — tech icon + name, colored by confidence level.
             // Responsive: when the column is too narrow for icon+name, show
             // the icon alone (2 cols). The icon is recognizable on its own.
             // When the column is < 3 cols, ratatui clips whatever we render.
-            let (framework_text, framework_fg) = if let Some(fw) = &service.framework {
+            let (framework_text, framework_fg) = if let Some(runtime) = service.runtime_display() {
+                (
+                    cell(&truncate_center(&runtime, fw_col_width as usize)),
+                    theme.container,
+                )
+            } else if let Some(fw) = &service.framework {
                 let icon = fw.tech_icon().unwrap_or("");
                 let icon_width = unicode_width::UnicodeWidthStr::width(icon);
                 let name_max = (fw_col_width as usize).saturating_sub(icon_width);

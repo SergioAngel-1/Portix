@@ -22,6 +22,9 @@ pub trait PlatformProbe: Send {
     fn list_listening_sockets(&self) -> Result<Vec<Socket>>;
 
     /// Get metadata for a specific process.
+    ///
+    /// The error is preserved by the engine so a disappearing process can be
+    /// distinguished from a permission/format failure in diagnostics.
     fn process_metadata(&self, pid: i32) -> Result<Process>;
 
     /// Check if a process is running inside a container.

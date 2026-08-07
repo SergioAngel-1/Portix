@@ -9,6 +9,14 @@ pub enum Degradation {
     SocketsWithoutPid(usize),
     /// N processes were found by PID but couldn't be read from /proc
     ProcessesPartialRead(usize),
+    /// N processes vanished (or lost their identity file) after the socket
+    /// scan found them.
+    ProcessesDisappeared(usize),
+    /// The reverse socket-inode → PID discovery failed as a whole. This is
+    /// deliberately distinct from `SocketsWithoutPid`: the latter means the
+    /// map completed and an individual owner was not visible, while this one
+    /// means Portix could not complete the ownership-discovery stage.
+    InodeMapFailed(String),
     /// The scan itself failed before any socket could be listed.
     ScanFailed(String),
     /// A container runtime appears active, but its published ports may be
@@ -27,6 +35,12 @@ impl Degradation {
             }
             Degradation::ProcessesPartialRead(n) => {
                 format!("{} processes couldn't be fully read.", n)
+            }
+            Degradation::ProcessesDisappeared(n) => {
+                format!("{} processes disappeared during the scan.", n)
+            }
+            Degradation::InodeMapFailed(msg) => {
+                format!("Socket ownership discovery failed: {msg}")
             }
             Degradation::ScanFailed(msg) => format!("Scan failed: {msg}"),
             Degradation::ContainerPortsHidden(msg) => {
@@ -87,6 +101,13 @@ mod tests {
         assert!(Degradation::SocketsWithoutPid(3)
             .message()
             .contains("other users"));
+    }
+
+    #[test]
+    fn test_discovery_failures_have_distinct_messages() {
+        assert!(Degradation::InodeMapFailed("permission denied".into())
+            .message()
+            .contains("ownership discovery"));
     }
 }
 

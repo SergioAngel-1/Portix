@@ -37,21 +37,26 @@ pub struct Container {
     pub runtime: Runtime,
     /// Container ID (short, 12 chars)
     pub id: String,
-    /// Container name (if available, requires Docker API in v1.5)
+    /// Container name (if available).
     pub name: Option<String>,
-    /// Docker Compose project name (if available)
+    /// Docker Compose project name (if available).
     pub compose_project: Option<String>,
+    /// Command reported by Docker Desktop for the container.
+    pub command: Option<String>,
+    /// Host-side process responsible for the published-port forwarder.
+    pub host_process: Option<String>,
 }
 
 impl Container {
-    /// A container with no name or compose project yet (the Docker API that
-    /// could provide them is only consulted in v1.5).
+    /// A container with no optional metadata.
     pub fn new(runtime: Runtime, id: String) -> Self {
         Self {
             runtime,
             id,
             name: None,
             compose_project: None,
+            command: None,
+            host_process: None,
         }
     }
 
