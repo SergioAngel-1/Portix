@@ -1,6 +1,9 @@
 # Rust build artifacts
 /target
 
+# Generated local desktop integrations (installed by scripts/install.sh)
+# Keep the source templates and icons under packaging/desktop tracked.
+
 # Local-only working files: never versioned, always present on this machine.
 # PRD.md is the working spec; .github/ holds the CI workflow (manual trigger,
 # this project does not deploy to GitHub). Clones will not contain either.

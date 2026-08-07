@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Portix
+Comment=Development service explorer
+Exec=@PORTIX_AUTOSTART@
+TryExec=@PORTIX_BIN@
+Icon=portix
+Terminal=false
+Categories=Development;
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
+X-Portix-Managed=true

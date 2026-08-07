@@ -40,7 +40,7 @@ impl Theme {
             bg: Color::Black,
             selection: Color::Rgb(40, 44, 60),
             highlight: Color::White,
-            alt_row: Color::Rgb(22, 22, 30),
+            alt_row: Color::Rgb(10, 10, 16),
         }
     }
 
@@ -60,7 +60,7 @@ impl Theme {
             bg: Color::Black,
             selection: Color::DarkGray,
             highlight: Color::White,
-            alt_row: Color::Rgb(16, 16, 16),
+            alt_row: Color::Rgb(8, 8, 8),
         }
     }
 

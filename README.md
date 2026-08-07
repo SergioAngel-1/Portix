@@ -79,13 +79,19 @@ Installing is a **local** operation — the CI pipeline only verifies the code,
 nothing deploys from GitHub (the workflow file is itself local-only, like the PRD). To update the binary on this machine, rebuild and overwrite it:
 
 ```bash
-portix --update                        # rebuild + reinstall to ~/.local/bin
+portix --update                        # update user binary, desktop entry, icon and autostart
+sudo portix --update                    # update system binary and then the invoking user's context
+portix --update --all-contexts           # update user + system installations
 # or manually:
 ./scripts/install.sh                   # release build -> ~/.local/bin/portix
 ./scripts/install.sh --sudo            # -> /usr/local/bin (prompts for password)
+./scripts/install.sh --all-contexts    # user install followed by system install
 ./scripts/install.sh --bin-dir "$HOME/.cargo/bin"
 ./scripts/install.sh --profile dev     # debug build (faster compile)
 BIN_DIR=/opt/portix ./scripts/install.sh  # same settings as env vars
+
+# Runtime caches are cleared by --update. The user config, Cargo registry and
+# the project target/ directory are preserved; they are not Portix runtime caches.
 ```
 
 The `--update` flag runs `scripts/install.sh` from the source tree that was
@@ -208,6 +214,7 @@ listening on that port. JSON output is wrapped in `schema_version` (currently
 | `--system-ports`     | Include ports below 1024                            |
 | `--no-color`         | Disable colors (the `NO_COLOR` env var does too)    |
 | `--update`           | Rebuild and reinstall from local source             |
+| `--all-contexts`     | With `--update`, update user and system contexts   |
 | `--completions <SH>` | Print shell completions (`bash`, `zsh`, `fish`, …)  |
 | `--proc-root <PATH>` | Read `/proc` from an alternative root (tests, containers) |
 

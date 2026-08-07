@@ -95,9 +95,15 @@ struct Cli {
     #[arg(long, value_name = "SHELL")]
     completions: Option<clap_complete::Shell>,
 
-    /// Rebuild and reinstall portix from local source
+    /// Rebuild and reinstall portix from local source tree.
     #[arg(long, conflicts_with_all = ["port", "port_flag", "json", "once", "kill"])]
     update: bool,
+
+    /// Update both the user installation and the privileged installation.
+    /// When run through sudo, the privileged updater also refreshes the
+    /// invoking user's installation and both runtime cache namespaces.
+    #[arg(long)]
+    all_contexts: bool,
 }
 
 /// Accept both `3000` and the `:3000` form users type from muscle memory.
@@ -144,8 +150,12 @@ fn run() -> Result<i32> {
         return Ok(exit::OK);
     }
 
+    if cli.all_contexts && !cli.update {
+        anyhow::bail!("--all-contexts requires --update");
+    }
+
     if cli.update {
-        return run_update();
+        return run_update(cli.all_contexts);
     }
 
     let mut config = Config::load();
@@ -449,7 +459,7 @@ impl Drop for RawModeGuard {
 /// The source tree path is baked in at compile time. If the binary was
 /// cross-compiled or moved away from the source, `--update` reports the path
 /// it expected and exits with an error.
-fn run_update() -> Result<i32> {
+fn run_update(all_contexts: bool) -> Result<i32> {
     // `option_env!` evaluates at compile time. When building from the project
     // root (the normal `cargo build` / `scripts/install.sh` flow), this is
     // always set. A binary built elsewhere (e.g., a distro package) gets None.
@@ -466,8 +476,16 @@ fn run_update() -> Result<i32> {
     }
 
     eprintln!("==> running {}", script.display());
-    let status = std::process::Command::new("bash")
-        .arg(&script)
+    let mut command = std::process::Command::new("bash");
+    command.arg(&script);
+    // A sudo invocation is the privileged context the user explicitly asked
+    // to update. In that case update both installations and clear both cache
+    // namespaces; a normal user invocation updates only the user install unless
+    // --all-contexts is supplied.
+    if all_contexts || std::env::var_os("SUDO_USER").is_some() {
+        command.arg("--all-contexts");
+    }
+    let status = command
         .status()
         .with_context(|| format!("failed to run {}", script.display()))?;
 

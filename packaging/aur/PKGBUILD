@@ -27,6 +27,11 @@ build() {
 package() {
     cd "$srcdir/portix-git"
     install -Dm755 target/release/portix "$pkgdir/usr/bin/portix"
+    install -d "$pkgdir/usr/share/applications"
+    sed -e 's|@PORTIX_BIN@|/usr/bin/portix|g'         -e 's|@PORTIX_LAUNCH@|ghostty -e sudo /usr/bin/portix|g'         -e 's|@PORTIX_UPDATE@|ghostty -e sudo /usr/bin/portix --update --all-contexts|g'         packaging/desktop/portix.desktop.in         > "$pkgdir/usr/share/applications/portix.desktop"
+    install -Dm644 packaging/desktop/icons/hicolor/256x256/apps/portix.png         "$pkgdir/usr/share/icons/hicolor/256x256/apps/portix.png"
+    install -Dm644 packaging/desktop/icons/hicolor/512x512/apps/portix.png         "$pkgdir/usr/share/icons/hicolor/512x512/apps/portix.png"
+    install -Dm644 packaging/desktop/index.theme         "$pkgdir/usr/share/icons/hicolor/index.theme"
     install -Dm644 README.md "$pkgdir/usr/share/doc/portix-git/README.md"
     install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/portix-git/LICENSE-MIT"
     install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/portix-git/LICENSE-APACHE"
