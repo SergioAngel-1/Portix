@@ -90,14 +90,20 @@ portix --update --all-contexts           # update user + system installations
 ./scripts/install.sh --profile dev     # debug build (faster compile)
 BIN_DIR=/opt/portix ./scripts/install.sh  # same settings as env vars
 
-# Runtime caches are cleared by --update. The user config, Cargo registry and
-# the project target/ directory are preserved; they are not Portix runtime caches.
+# Runtime caches are cleared by --update. Existing Portix TUI instances are
+# stopped first to prevent old/new versions from overlapping. The user config,
+# Cargo registry and the project target/ directory are preserved; they are not
+# Portix runtime caches.
 ```
 
 The `--update` flag runs `scripts/install.sh` from the source tree that was
-used to build the current binary. The source path is baked in at compile time
-via `CARGO_MANIFEST_DIR`, so it works after `git pull` without needing to
-remember the script location.
+used to build the current binary. Before rebuilding, it stops other Portix
+instances so an old TUI cannot overlap the new version. A normal-user update
+also asks for `sudo` when root-owned Portix instances must be stopped; direct
+`sudo portix --update` performs the privileged update and refreshes the
+invoking user's installation. The source path is baked in at compile time via
+`CARGO_MANIFEST_DIR`, so it works after `git pull` without needing to remember
+the script location.
 
 ## Using the app (TUI)
 

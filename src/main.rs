@@ -482,10 +482,10 @@ fn run_update(all_contexts: bool) -> Result<i32> {
     // binary. Keep this updater alive until the script returns; otherwise the
     // cleanup would kill the process that is currently performing the update.
     command.env("PORTIX_UPDATE_KEEP_PID", std::process::id().to_string());
-    // A sudo invocation is the privileged context the user explicitly asked
-    // to update. In that case update both installations and clear both cache
-    // namespaces; a normal user invocation updates only the user install unless
-    // --all-contexts is supplied.
+    // A normal terminal update updates the user installation, but first asks
+    // the installer to stop root-owned stale TUIs through sudo. A direct sudo
+    // invocation updates the privileged installation and then the invoking
+    // user's context.
     if all_contexts || std::env::var_os("SUDO_USER").is_some() {
         command.arg("--all-contexts");
     }

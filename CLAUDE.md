@@ -29,9 +29,10 @@ cargo fmt
 
 Installing is a **local** operation: the CI pipeline (`.github/workflows/ci.yml`,
 manual trigger, itself gitignored/local-only like `PRD.md`) only verifies —
-nothing deploys from GitHub. `scripts/install.sh` builds and overwrites the
-binary in place; re-running it after a `git pull` is how you update Portix on
-this machine.
+nothing deploys from GitHub. `scripts/install.sh` stops existing Portix instances (including root-owned
+instances through sudo when needed), builds, and overwrites the binary in
+place; re-running it after a `git pull` is how you update Portix on this
+machine.
 
 Tests live in `#[cfg(test)] mod tests` blocks inside the module they test (`platform/linux/net.rs`, `detect/scoring.rs`, `ui/format.rs`, `ui/theme.rs`, `core/config.rs`, …). `tests/fixtures/` is reserved for `/proc` trees and project trees driven through `--proc-root`; the top-level `benches/`, `fuzz/`, `detectors/`, `themes/` dirs are still empty placeholders for later phases (theming itself is live in `ui/theme.rs`, not the `themes/` dir; the `ui/input.rs` and `ui/widgets/` slots were deleted, their reservation lives on in the commented-out lines of `ui/mod.rs`).
 

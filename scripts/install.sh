@@ -14,6 +14,9 @@
 #   scripts/install.sh --all-contexts          # user install, then privileged install
 #   scripts/install.sh --bin-dir "$HOME/.cargo/bin"
 #
+# Every install/update first stops all other Portix instances (user and root),
+# allowing only the process that initiated the update to survive.
+#
 # Environment variables:
 #   BIN_DIR=/opt/portix PROFILE=release scripts/install.sh
 set -euo pipefail
@@ -25,6 +28,9 @@ BIN_DIR_EXPLICIT=0
 SUDO_MODE=0
 ALL_CONTEXTS=0
 NO_RECURSE="${PORTIX_NO_RECURSE:-0}"
+UPDATE_KEEP_PID="${PORTIX_UPDATE_KEEP_PID:-0}"
+ROOT_CLEANED="${PORTIX_ROOT_CLEANED:-0}"
+STOP_ONLY="${PORTIX_STOP_ONLY:-0}"
 
 usage() {
     sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -155,6 +161,198 @@ clear_runtime_caches() {
     remove_exact_dir "$home/.local/state/portix"
 }
 
+is_portix_process() {
+    local pid="$1"
+    local exe first cmdline
+
+    exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+    case "${exe##*/}" in
+        portix|portix-static)
+            return 0
+            ;;
+    esac
+
+    # An executable can be replaced while an old instance is still alive. Use
+    # argv as a fallback, but inspect only the executable token; a project path
+    # or URL containing the word "portix" must not be treated as Portix.
+    # Feed the path to `cat` rather than using shell input redirection: a PID
+    # can disappear between the directory glob and this read, and bash would
+    # print a redirection error before `2>/dev/null` could apply.
+    cmdline="$(cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' || true)"
+    first="${cmdline%% *}"
+    case "${first##*/}" in
+        portix|portix-static)
+            return 0
+            ;;
+        sudo)
+            # `sudo portix` leaves a sudo supervisor around the TUI. Include
+            # that supervisor so updates do not leave a second stale wrapper.
+            local rest token
+            rest="${cmdline#* }"
+            for token in $rest; do
+                case "${token##*/}" in
+                    portix|portix-static)
+                        return 0
+                        ;;
+                esac
+            done
+            ;;
+    esac
+
+    return 1
+}
+
+parent_pid() {
+    local pid="$1"
+    local stat suffix state ppid _rest
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    [ -n "$stat" ] || return 1
+    suffix="${stat##*) }"
+    read -r state ppid _rest <<< "$suffix"
+    case "$ppid" in
+        ''|*[!0-9]*) return 1 ;;
+        *) printf '%s\n' "$ppid" ;;
+    esac
+}
+
+is_protected_pid() {
+    local candidate="$1"
+    local root current parent
+
+    for root in "$self_pid" "$keep_pid"; do
+        [ "$root" != 0 ] || continue
+        current="$root"
+        while [ "$current" -gt 1 ] 2>/dev/null; do
+            [ "$current" != "$candidate" ] || return 0
+            parent="$(parent_pid "$current" || true)"
+            [ -n "$parent" ] || break
+            [ "$parent" != "$current" ] || break
+            current="$parent"
+        done
+    done
+    return 1
+}
+
+pid_alive() {
+    local pid="$1"
+    # `/proc/$pid` also works when the caller cannot signal a process owned by
+    # another user; `kill -0` alone reports that case as if it had vanished.
+    if [ -d "/proc/$pid" ]; then
+        return 0
+    fi
+    if [ "${#PRIV[@]}" -gt 0 ] && run_priv kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+send_signal() {
+    local signal="$1"
+    local pid="$2"
+    if kill "$signal" "$pid" 2>/dev/null; then
+        return 0
+    fi
+    if [ "${#PRIV[@]}" -gt 0 ]; then
+        run_priv kill "$signal" "$pid" 2>/dev/null || true
+    fi
+}
+
+can_manage_pid() {
+    local pid="$1"
+    local owner
+    owner="$(stat -c '%u' "/proc/$pid" 2>/dev/null || true)"
+    [ "$owner" = "$(id -u)" ] || [ "${EUID:-$(id -u)}" -eq 0 ] || [ "${#PRIV[@]}" -gt 0 ]
+}
+
+stop_existing_portix() {
+    local keep_pid="${UPDATE_KEEP_PID:-0}"
+    local self_pid="$$"
+    local pid
+    local -a pids=()
+
+    case "$keep_pid" in
+        ''|*[!0-9]*) keep_pid=0 ;;
+    esac
+
+    # `/proc` is used instead of `pkill portix`: it lets us retain the updater
+    # PID and avoids matching unrelated commands whose arguments contain the
+    # word "portix". No process environment is read.
+    for pid_dir in /proc/[0-9]*; do
+        pid="${pid_dir##*/}"
+        case "$pid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        [ "$pid" != "$self_pid" ] || continue
+        [ "$pid" != "$keep_pid" ] || continue
+        is_protected_pid "$pid" && continue
+        if is_portix_process "$pid"; then
+            pids+=("$pid")
+        fi
+    done
+
+    [ "${#pids[@]}" -gt 0 ] || return 0
+    echo "==> stopping existing Portix instances: ${pids[*]}"
+
+    # Prefer TERM so each TUI can restore its terminal. After a one-second
+    # grace period, force-kill anything that did not leave. In a normal user
+    # update this handles the user's processes; the recursive sudo update
+    # handles root-owned instances.
+    for pid in "${pids[@]}"; do
+        if can_manage_pid "$pid"; then
+            send_signal -TERM "$pid"
+        fi
+    done
+
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        local remaining=0
+        for pid in "${pids[@]}"; do
+            if pid_alive "$pid"; then
+                remaining=1
+                break
+            fi
+        done
+        [ "$remaining" -eq 0 ] && return 0
+        sleep 0.1
+    done
+
+    for pid in "${pids[@]}"; do
+        if pid_alive "$pid" && can_manage_pid "$pid"; then
+            send_signal -KILL "$pid"
+        fi
+    done
+}
+
+root_portix_present() {
+    [ "${EUID:-$(id -u)}" -ne 0 ] || return 1
+
+    local self_pid="$$"
+    local keep_pid="${UPDATE_KEEP_PID:-0}"
+    local pid uid
+    for pid_dir in /proc/[0-9]*; do
+        pid="${pid_dir##*/}"
+        case "$pid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        [ "$pid" != "$keep_pid" ] || continue
+        is_protected_pid "$pid" && continue
+        uid="$(stat -c '%u' "$pid_dir" 2>/dev/null || true)"
+        [ "$uid" = 0 ] || continue
+        if is_portix_process "$pid"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+stop_root_portix_via_sudo() {
+    root_portix_present || return 0
+    echo "==> stopping root Portix instances through sudo"
+    sudo --preserve-env=SUDO_USER env \
+        PORTIX_NO_RECURSE=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
+        PORTIX_STOP_ONLY=1 \
+        "$PROJECT_ROOT/scripts/install.sh" --sudo --profile "$PROFILE"
+}
+
 clear_all_runtime_caches() {
     clear_runtime_caches "$HOME"
 
@@ -268,6 +466,20 @@ install_system_integration() {
 }
 
 cd "$PROJECT_ROOT"
+# Stop the privileged context first. If sudo authentication fails, do not stop
+# the user's instances or replace any binary: an update must be atomic from the
+# user's point of view. The caller's updater PID is excluded via
+# PORTIX_UPDATE_KEEP_PID.
+if [ "${EUID:-$(id -u)}" -ne 0 ] && [ "$STOP_ONLY" -eq 0 ] && [ "$ROOT_CLEANED" -eq 0 ]; then
+    stop_root_portix_via_sudo
+fi
+stop_existing_portix
+
+if [ "$STOP_ONLY" -eq 1 ]; then
+    echo "Stopped existing Portix instances."
+    exit 0
+fi
+
 run_build
 
 SRC="$PROJECT_ROOT/$SRC_REL"
@@ -292,12 +504,14 @@ if [ "$NO_RECURSE" -eq 0 ] && { [ "$ALL_CONTEXTS" -eq 1 ] || { [ "${EUID:-$(id -
         if [ -n "$INVOKING_HOME" ]; then
             echo "==> updating invoking user context: $SUDO_USER"
             runuser -u "$SUDO_USER" -- env HOME="$INVOKING_HOME" \
-                PORTIX_NO_RECURSE=1 BIN_DIR="$INVOKING_HOME/.local/bin" \
+                PORTIX_NO_RECURSE=1 ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
+                BIN_DIR="$INVOKING_HOME/.local/bin" \
                 "$PROJECT_ROOT/scripts/install.sh" --profile "$PROFILE"
         fi
     else
         echo "==> updating privileged context via sudo"
-        sudo --preserve-env=SUDO_USER env PORTIX_NO_RECURSE=1 \
+        sudo --preserve-env=SUDO_USER env \
+            PORTIX_NO_RECURSE=1 ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
             "$PROJECT_ROOT/scripts/install.sh" --sudo --profile "$PROFILE"
     fi
 fi
