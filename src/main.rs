@@ -478,6 +478,10 @@ fn run_update(all_contexts: bool) -> Result<i32> {
     eprintln!("==> running {}", script.display());
     let mut command = std::process::Command::new("bash");
     command.arg(&script);
+    // The installer stops every other Portix instance before replacing the
+    // binary. Keep this updater alive until the script returns; otherwise the
+    // cleanup would kill the process that is currently performing the update.
+    command.env("PORTIX_UPDATE_KEEP_PID", std::process::id().to_string());
     // A sudo invocation is the privileged context the user explicitly asked
     // to update. In that case update both installations and clear both cache
     // namespaces; a normal user invocation updates only the user install unless

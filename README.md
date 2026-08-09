@@ -118,7 +118,7 @@ You get a live, auto-refreshing table. Move around and act with single keys:
 | `h` / `Esc`    | Close the detail panel                   |
 | `/`            | Search (filters as you type)             |
 | `o`            | Open the service URL in your browser     |
-| `y`            | Copy the URL to the clipboard            |
+| `y`            | Copy the URL to the clipboard (Klipper, Wayland or X11) |
 | `x`            | Kill the process (SIGTERM)               |
 | `X`            | Force-kill the process (SIGKILL)         |
 | `r`            | Refresh now                              |
@@ -149,6 +149,13 @@ The table uses semantic colors to guide the eye:
   and colors, and its title includes the project name.
 - The **theme picker** (`t`) previews themes live; `Enter` saves, `Esc`
   reverts.
+
+The browser action first honors a simple executable named by `$BROWSER`; on KDE
+it otherwise uses an installed browser directly (Chrome/Chromium/Firefox) so
+Plasma 6 sessions do not depend on obsolete `kfmclient` behavior. If no
+browser executable is discoverable, it falls back to the desktop opener.
+Clipboard copying uses Klipper over the KDE session bus on Plasma, then falls
+back to `wl-copy`, `xclip`, or `xsel` when available.
 
 The table adapts to terminal width — all columns stay visible from 80
 columns up, with PROJECT absorbing extra space on wider terminals. On very

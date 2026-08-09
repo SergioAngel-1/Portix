@@ -82,7 +82,7 @@ These come from PRD §7, §13 and exist because each has bitten a real tool:
 - **Pin the process before signalling.** TOCTOU: the PID may have been recycled between the snapshot and the keypress. The signal goes through a **pidfd** (`pidfd_open` + `pidfd_send_signal`, Linux ≥ 5.3): the fd pins the exact process, so a recycled PID can never be hit; identity is re-verified both before and after the open. Kernels without `pidfd_open` fall back to the starttime re-check + `kill(2)` (same guard, microsecond window).
 - **Never `sh -c`.** Always `Command::new(prog).arg(x)` with separated args.
 - **`/proc/<pid>/environ` is never read.** It holds `DATABASE_URL` and tokens. Detector `env_var` signals may test for a key's *existence* only.
-- **No network. Ever.** No telemetry, no update checks. The only outbound action is `xdg-open` on a localhost URL.
+- **No network. Ever.** No telemetry, no update checks. The only outbound action is opening a localhost URL through the desktop/browser launcher (`$BROWSER`, KDE's browser command, or the `xdg-open` fallback).
 - **No setuid, no capabilities, no `sudo`/`pkexec` invocation.** Unreadable `/proc` entries (`EACCES`) degrade gracefully into a partial row; they are not errors.
 - Target `#![forbid(unsafe_code)]` everywhere outside `platform/linux/`, and no `unwrap()`/`expect()` in `platform/` or `detect/` — a process can vanish between `readdir` and `open`, and that is the normal case, not an exception.
 

@@ -8,6 +8,10 @@ arch=('x86_64')
 url="https://github.com/SergioAngel-1/Portix"
 license=('MIT' 'Apache-2.0')
 depends=('glibc' 'gcc-libs')
+optdepends=('xdg-utils: desktop opener fallback for the "o" key'
+            'wl-clipboard: copy a service URL on Wayland (the "y" key)'
+            'xclip: copy a service URL on X11 (the "y" key)'
+            'xsel: copy a service URL on X11 (the "y" key)')
 makedepends=('cargo' 'rust' 'git')   # 'git': the source is a VCS (git+) clone
 provides=('portix')
 conflicts=('portix')
