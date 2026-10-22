@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
 use portix_lib::core::Engine;
@@ -70,16 +70,18 @@ pub fn print_json(engine: &mut Engine, port: Option<u16>) -> Result<i32> {
     };
 
     // stdout carries JSON and nothing else; warnings go to stderr.
+    let mut out = io::stdout().lock();
     match port {
         Some(port) => match snapshot.by_port(port) {
             Some(service) => {
-                println!(
+                writeln!(
+                    out,
                     "{}",
                     serde_json::to_string_pretty(&JsonService {
                         schema_version: SCHEMA_VERSION,
                         service,
                     })?
-                );
+                )?;
                 Ok(exit::OK)
             }
             None => {
@@ -88,13 +90,14 @@ pub fn print_json(engine: &mut Engine, port: Option<u16>) -> Result<i32> {
             }
         },
         None => {
-            println!(
+            writeln!(
+                out,
                 "{}",
                 serde_json::to_string_pretty(&JsonOutput {
                     schema_version: SCHEMA_VERSION,
                     snapshot: &snapshot,
                 })?
-            );
+            )?;
             Ok(exit::OK)
         }
     }
@@ -109,7 +112,9 @@ pub fn print_port(engine: &mut Engine, port: u16) -> Result<i32> {
         return Ok(exit::NO_MATCH);
     };
 
-    println!(
+    let mut out = io::stdout().lock();
+    writeln!(
+        out,
         ":{} {} {} {}",
         service.socket.port,
         cell(&service.project_display()),
@@ -119,17 +124,19 @@ pub fn print_port(engine: &mut Engine, port: u16) -> Result<i32> {
             .as_ref()
             .map(|p| format!("pid {}", p.pid))
             .unwrap_or_default(),
-    );
+    )?;
     Ok(exit::OK)
 }
 
 pub fn print_table(engine: &mut Engine) -> Result<i32> {
     let snapshot = scan_with_cpu(engine);
+    let mut out = io::stdout().lock();
 
-    println!(
+    writeln!(
+        out,
         "{:<6} {:<6} {:<10} {:<20} {:<18} {:<18} {:>7} {:>7} {:>7} {:>8}",
         "PORT", "PROTO", "SCOPE", "PROJECT", "FRAMEWORK", "COMMAND", "PID", "CPU", "MEM", "UPTIME"
-    );
+    )?;
 
     for service in snapshot.sorted_by_port() {
         let process = service.process.as_ref();
@@ -138,7 +145,8 @@ pub fn print_table(engine: &mut Engine) -> Result<i32> {
             portix_lib::model::BindScope::AllInterfaces => "○ ",
             portix_lib::model::BindScope::Specific(_) => "◆ ",
         };
-        println!(
+        writeln!(
+            out,
             "{:>5}  {:<6} {:<10} {:<20} {:<18} {:<18} {:>7} {:>7} {:>7} {:>8}",
             service.socket.port,
             service.socket.proto_display(),
@@ -169,7 +177,7 @@ pub fn print_table(engine: &mut Engine) -> Result<i32> {
                 .and_then(|p| p.metrics.uptime)
                 .map(format_uptime)
                 .unwrap_or("—".into()),
-        );
+        )?;
     }
 
     for degradation in &snapshot.degradations {

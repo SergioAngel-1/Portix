@@ -109,6 +109,10 @@ fn parse_port(raw: &str) -> Result<u16, String> {
 fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
+        // `portix --once | head` closes the pipe early. That is the reader
+        // being done, not a failure: `println!` used to panic on the EPIPE,
+        // and reporting it as an error would be just as wrong. Exit quietly.
+        Err(e) if is_broken_pipe(&e) => std::process::exit(exit::OK),
         Err(e) => {
             // The error can embed system-derived paths; sanitize before it
             // reaches the terminal (PRD §13.2).
@@ -116,6 +120,14 @@ fn main() {
             std::process::exit(exit::ERROR);
         }
     }
+}
+
+/// Whether `error` is a write to a stdout whose reader has gone away.
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<io::Error>())
+        .any(|io| io.kind() == io::ErrorKind::BrokenPipe)
 }
 
 fn run() -> Result<i32> {
@@ -608,6 +620,19 @@ fn run_effect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A closed downstream pipe ends the output quietly; any other error,
+    /// I/O or not, is still reported.
+    #[test]
+    fn test_broken_pipe_is_recognised_through_context() {
+        let pipe = anyhow::Error::new(io::Error::from(io::ErrorKind::BrokenPipe))
+            .context("writing the table");
+        assert!(is_broken_pipe(&pipe));
+
+        let denied = anyhow::Error::new(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(!is_broken_pipe(&denied));
+        assert!(!is_broken_pipe(&anyhow::anyhow!("scan failed")));
+    }
 
     /// Focused: wait out the remainder of the configured refresh interval.
     #[test]
