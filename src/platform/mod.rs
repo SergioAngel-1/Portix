@@ -19,13 +19,31 @@ use std::path::Path;
 /// re-scans.
 pub trait PlatformProbe: Send {
     /// List all listening sockets on the system.
-    fn list_listening_sockets(&self) -> Result<Vec<Socket>>;
+    ///
+    /// `include_udp` lets the caller skip `/proc/net/udp*` entirely when UDP
+    /// sockets are filtered out of the view: reading two extra proc files just
+    /// to discard every row is pure waste on a busy box.
+    fn list_listening_sockets(&self, include_udp: bool) -> Result<Vec<Socket>>;
 
     /// Get metadata for a specific process.
     ///
     /// The error is preserved by the engine so a disappearing process can be
     /// distinguished from a permission/format failure in diagnostics.
     fn process_metadata(&self, pid: i32) -> Result<Process>;
+
+    /// Read only the process start time (in jiffies since boot).
+    ///
+    /// Cheap identity check: `(pid, starttime)` survives PID reuse, and the
+    /// engine validates its cached inode→process map with one read per owner
+    /// per scan instead of re-walking every fd table.
+    fn process_starttime(&self, pid: i32) -> Option<u64>;
+
+    /// Effective UID of the Portix process.
+    ///
+    /// `/proc/<pid>/fd` is only readable for the process owner (and root).
+    /// Sockets owned by another UID can never be resolved by this process, so
+    /// the engine must not retry an impossible fd walk for them on every scan.
+    fn effective_uid(&self) -> u32;
 
     /// Check if a process is running inside a container.
     fn container_of(&self, pid: i32) -> Option<Container>;
@@ -74,12 +92,20 @@ impl LinuxProbe {
 }
 
 impl PlatformProbe for LinuxProbe {
-    fn list_listening_sockets(&self) -> Result<Vec<Socket>> {
-        linux::net::list_listening_sockets(&self.proc_root)
+    fn list_listening_sockets(&self, include_udp: bool) -> Result<Vec<Socket>> {
+        linux::net::list_listening_sockets(&self.proc_root, include_udp)
     }
 
     fn process_metadata(&self, pid: i32) -> Result<Process> {
         linux::proc::process_metadata(&self.proc_root, pid)
+    }
+
+    fn process_starttime(&self, pid: i32) -> Option<u64> {
+        linux::proc::read_starttime_jiffies(&self.proc_root, pid)
+    }
+
+    fn effective_uid(&self) -> u32 {
+        linux::proc::effective_uid()
     }
 
     fn container_of(&self, pid: i32) -> Option<Container> {

@@ -769,8 +769,13 @@ fn run_effect(effect: Effect, app: &mut App, engine: &Arc<Mutex<Engine>>) -> Con
 
         Effect::Refresh => {
             // A manual refresh is user-initiated, so an inline scan is fine —
-            // it locks the engine away from the collector for one scan.
-            let snapshot = engine.lock().unwrap_or_else(|p| p.into_inner()).scan();
+            // it locks the engine away from the collector for one scan. It
+            // forces a full inode revalidation: `r` is the recovery action for
+            // a stale ownership cache.
+            let snapshot = engine
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .scan_fresh();
             app.update_snapshot(snapshot);
         }
 

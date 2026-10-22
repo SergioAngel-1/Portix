@@ -254,8 +254,22 @@ struct StatInfo {
     stime: u64,
 }
 
-/// Resolve a numeric UID to a username via the POSIX `getpwuid_r` API.
+/// Effective UID of the current process.
 ///
+/// `/proc/<pid>/fd` is `dr-x------`: a socket owned by another UID can never be
+/// resolved, no matter how many times the engine retries. Knowing our own UID
+/// lets the engine mark those inodes as permanently unresolved instead of
+/// paying a full fd-table walk for them on every refresh.
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` has no preconditions, takes no pointers, and cannot
+    // fail. It only reads the kernel's cached credential for this process.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::geteuid()
+    }
+}
+
+/// Resolve a numeric UID to a username via the POSIX `getpwuid_r` API.///
 /// `pub(crate)`: the engine calls this through the L4 cache
 /// (`CacheStore::get_user`/`insert_user`); platform exposes the primitive,
 /// core decides how often it runs.

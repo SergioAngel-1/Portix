@@ -8,15 +8,48 @@ use crate::core::Config;
 use crate::detect::project::{detect_project, manifest_mtime};
 use crate::detect::DetectorRegistry;
 use crate::model::{
-    Degradation, Family, Process, ProcessKey, Service, ServiceId, SharedSnapshot, Signal, Snapshot,
-    Socket,
+    Degradation, Family, Process, ProcessKey, Protocol, Service, ServiceId, SharedSnapshot, Signal,
+    Snapshot, Socket,
 };
 use crate::platform::{LinuxProbe, PlatformProbe};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How often the inode→process cache is rebuilt from scratch.
+///
+/// Per-scan validation already catches a dead/recycled PID and a socket whose
+/// `(port, protocol, uid)` changed. A full rebuild is the safety net for the
+/// rare case where the same inode is reused for an identical-looking socket:
+/// it costs one fd-table walk every five minutes, not one per second.
+const INODE_REVALIDATE: Duration = Duration::from_secs(300);
+
+/// Backoff for an inode we expected to resolve but could not (a process that
+/// vanished mid-scan, or a `/proc` hidden by `hidepid`).
+const INODE_MISSING_RETRY: Duration = Duration::from_secs(30);
+
+/// Backoff for sockets owned by another UID. Their `fd` tables are unreadable
+/// by this process forever, so retrying them can only burn syscalls.
+const INODE_FOREIGN_RETRY: Duration = Duration::from_secs(3600);
+
+/// Cached owner of a listening socket's inode.
+///
+/// `(pid, starttime)` is the same identity the kill path pins: a recycled PID
+/// carries a different start time. `(port, protocol, uid)` identifies the
+/// socket sitting on that inode, so an inode reused by a different listener is
+/// detected even when the PID is still alive.
+#[derive(Debug, Clone)]
+struct InodeOwner {
+    pid: i32,
+    /// Filled in after the process metadata is read on the scan that resolved
+    /// the inode; `None` means "not validated yet" and is treated as stale.
+    starttime_jiffies: Option<u64>,
+    port: u16,
+    protocol: Protocol,
+    uid: u32,
+}
 
 /// The core engine that orchestrates scanning, detection, and caching.
 pub struct Engine {
@@ -29,6 +62,16 @@ pub struct Engine {
     /// heuristic walks all of `/proc` (cgroup + cmdline of every pid) and is
     /// far too expensive to run on every refresh.
     container_warning: Option<(Instant, Option<Degradation>)>,
+    /// Cached `socket inode → owning process`. A full `/proc/<pid>/fd` walk is
+    /// O(every descriptor on the box); it only has to run when a socket we do
+    /// not know about appears (or on the periodic revalidation), not on every
+    /// refresh.
+    inode_owners: HashMap<u64, InodeOwner>,
+    /// Inodes whose resolution failed, with the `Instant` before which they
+    /// must not be retried.
+    inode_retry: HashMap<u64, Instant>,
+    /// When the last full rebuild of `inode_owners` happened.
+    last_inode_revalidate: Instant,
 }
 
 impl Engine {
@@ -37,7 +80,12 @@ impl Engine {
     /// Infallible: the probe construction and uid resolution never fail on the
     /// Linux backend, so callers get an `Engine` straight away.
     pub fn new(proc_root: Option<&Path>, config: Config) -> Self {
-        let platform = Box::new(LinuxProbe::new(proc_root));
+        Self::from_platform(Box::new(LinuxProbe::new(proc_root)), config)
+    }
+
+    /// Build an engine around an arbitrary probe. Kept separate so tests can
+    /// inject a probe that counts fd-table walks.
+    fn from_platform(platform: Box<dyn PlatformProbe>, config: Config) -> Self {
         let num_cpus = platform.num_cpus();
 
         Self {
@@ -47,6 +95,9 @@ impl Engine {
             config,
             num_cpus,
             container_warning: None,
+            inode_owners: HashMap::new(),
+            inode_retry: HashMap::new(),
+            last_inode_revalidate: Instant::now(),
         }
     }
 
@@ -65,7 +116,8 @@ impl Engine {
     ///
     /// This is the only safe way to turn a port into a kill target: the
     /// snapshot the UI holds can be seconds old, and the process behind a port
-    /// may have exited and been replaced in that window.
+    /// may have exited and been replaced in that window. The inode cache is
+    /// bypassed: a stale owner must never become a signal target.
     ///
     /// The scan ignores the display filters (`show_system_ports`,
     /// `show_loopback_only`, `show_udp`): this is the CLI kill path, which
@@ -74,7 +126,7 @@ impl Engine {
     /// [`Self::service_on_inode`] instead, which keeps the filters: a row the
     /// user can select is by definition visible.)
     pub fn service_on_port(&mut self, port: u16) -> Option<Service> {
-        let snapshot = self.scan_unfiltered();
+        let snapshot = self.scan_inner(false, true);
         snapshot.by_port(port).cloned()
     }
 
@@ -85,8 +137,12 @@ impl Engine {
     /// port alone cannot say *which* row. The inode exists only while that
     /// socket does — a rebind opens a new inode and resolves to None, which
     /// is precisely the safe direction for a kill.
+    ///
+    /// The cached inode map is deliberately bypassed: the signal target must
+    /// come from a live `/proc/<pid>/fd` walk, never from a mapping that could
+    /// be one refresh old.
     pub fn service_on_inode(&mut self, inode: u64) -> Option<Service> {
-        let snapshot = self.scan();
+        let snapshot = self.scan_inner(true, true);
         snapshot.by_inode(inode).cloned()
     }
 
@@ -97,7 +153,16 @@ impl Engine {
     /// `degradations` instead of erroring, so the UI always has a frame to
     /// draw. `Degradation::ScanFailed` is the "the scan itself failed" signal.
     pub fn scan(&mut self) -> SharedSnapshot {
-        self.scan_inner(true)
+        self.scan_inner(true, false)
+    }
+
+    /// A scan that rebuilds the inode→process map from scratch.
+    ///
+    /// Used by the user's explicit refresh action: it is the one moment where
+    /// "prove the ownership cache against a live fd walk" is worth the cost,
+    /// and it also makes the `r` key a reliable recovery action.
+    pub fn scan_fresh(&mut self) -> SharedSnapshot {
+        self.scan_inner(true, true)
     }
 
     /// Like [`Self::scan`], but ignoring the display filters
@@ -110,14 +175,15 @@ impl Engine {
     /// (which would e.g. make `portix :80 || pnpm dev` start a server on a
     /// taken port).
     pub fn scan_unfiltered(&mut self) -> SharedSnapshot {
-        self.scan_inner(false)
+        self.scan_inner(false, false)
     }
 
-    fn scan_inner(&mut self, apply_filters: bool) -> SharedSnapshot {
+    fn scan_inner(&mut self, apply_filters: bool, force_full_inode_map: bool) -> SharedSnapshot {
         let start = Instant::now();
         let mut degradations = Vec::new();
 
-        let sockets = match self.platform.list_listening_sockets() {
+        let include_udp = !apply_filters || self.config.show_udp;
+        let sockets = match self.platform.list_listening_sockets(include_udp) {
             Ok(s) => s,
             Err(e) => return Arc::new(self.empty_snapshot(start, e)),
         };
@@ -137,11 +203,16 @@ impl Engine {
         };
 
         let interest: HashSet<u64> = sockets.iter().map(|s| s.inode).collect();
-        let (inode_map, inode_map_error) = match self.platform.build_inode_map(&interest) {
-            Ok(map) => (map, None),
-            Err(error) => (HashMap::new(), Some(format!("{error:#}"))),
-        };
-        if let Some(error) = inode_map_error {
+        // The socket's own fields are the cheap half of cache validation: an
+        // inode reused by a different listener is caught without walking /proc.
+        let socket_meta: HashMap<u64, (u16, Protocol, u32)> = sockets
+            .iter()
+            .map(|s| (s.inode, (s.port, s.protocol, s.uid)))
+            .collect();
+
+        if let Some(error) =
+            self.refresh_inode_owners(&interest, &socket_meta, force_full_inode_map)
+        {
             degradations.push(Degradation::InodeMapFailed(error));
         }
 
@@ -171,10 +242,7 @@ impl Engine {
         let mut seen_context: HashMap<(i32, u16), Context> = HashMap::new();
 
         for socket in sockets {
-            let pid = inode_map
-                .get(&socket.inode)
-                .and_then(|v| v.first())
-                .map(|&(pid, _)| pid);
+            let pid = self.inode_owners.get(&socket.inode).map(|owner| owner.pid);
 
             let process = match pid {
                 Some(pid) => match seen.get(&pid) {
@@ -204,6 +272,18 @@ impl Engine {
                     None
                 }
             };
+
+            // The cache entry was created with `starttime_jiffies: None`
+            // because the fd walk only knows the PID. Fill in the identity
+            // now that the process metadata has been read; from the next scan
+            // on, validation is a single `/proc/<pid>/stat` read.
+            if let (Some(pid), Some(process)) = (pid, process.as_ref()) {
+                if let Some(owner) = self.inode_owners.get_mut(&socket.inode) {
+                    if owner.pid == pid {
+                        owner.starttime_jiffies = Some(process.starttime_jiffies);
+                    }
+                }
+            }
 
             let container = match pid {
                 Some(pid) => match seen_container.get(&pid) {
@@ -288,6 +368,139 @@ impl Engine {
             taken_at_epoch_secs: epoch_secs(),
             scan_duration_ms: start.elapsed().as_millis() as u64,
             degradations: vec![Degradation::ScanFailed(format!("{error:#}"))],
+        }
+    }
+
+    /// Bring the inode→process cache up to date.
+    ///
+    /// A full `build_inode_map` is O(every descriptor on the box). The whole
+    /// point of this cache is to pay that only when:
+    /// - a socket inode we have never seen appears (a server just started),
+    /// - a cached owner fails validation (PID died/recycled, socket changed),
+    /// - the periodic safety revalidation fires.
+    ///
+    /// Returns an error string to surface as `Degradation::InodeMapFailed`
+    /// when the underlying fd walk itself failed.
+    fn refresh_inode_owners(
+        &mut self,
+        interest: &HashSet<u64>,
+        socket_meta: &HashMap<u64, (u16, Protocol, u32)>,
+        force_full: bool,
+    ) -> Option<String> {
+        let now = Instant::now();
+
+        // Sockets that stopped listening must not keep their owner forever;
+        // the same for backoff entries whose inode is gone.
+        self.inode_owners
+            .retain(|inode, _| interest.contains(inode));
+        self.inode_retry
+            .retain(|inode, until| interest.contains(inode) && *until > now);
+
+        let mut pending: HashSet<u64> = HashSet::new();
+        let rebuild_all = force_full || self.last_inode_revalidate.elapsed() >= INODE_REVALIDATE;
+
+        if rebuild_all {
+            // Drop every mapping and prove it again against live /proc. This
+            // is the safety net for an fd handed to another process or an
+            // inode recycled into an identical-looking socket.
+            self.inode_owners.clear();
+            self.last_inode_revalidate = now;
+            pending.extend(interest.iter().copied());
+        } else {
+            // Cheap validation of every cached owner: PID identity plus the
+            // socket tuple. No fd table is touched here.
+            let mut invalid = Vec::new();
+            for (inode, owner) in &self.inode_owners {
+                let Some(&(port, protocol, uid)) = socket_meta.get(inode) else {
+                    invalid.push(*inode);
+                    continue;
+                };
+                let socket_ok =
+                    owner.port == port && owner.protocol == protocol && owner.uid == uid;
+                let pid_ok = owner.starttime_jiffies.is_some_and(|starttime| {
+                    self.platform.process_starttime(owner.pid) == Some(starttime)
+                });
+                if !socket_ok || !pid_ok {
+                    invalid.push(*inode);
+                }
+            }
+            for inode in invalid {
+                self.inode_owners.remove(&inode);
+                pending.insert(inode);
+            }
+            for inode in interest {
+                if !self.inode_owners.contains_key(inode) {
+                    pending.insert(*inode);
+                }
+            }
+        }
+
+        // Sockets owned by another UID can never be resolved by this process:
+        // `/proc/<pid>/fd` is `dr-x------`. Give them a long backoff instead
+        // of letting them force a full fd walk on every refresh (which is
+        // exactly why the old early-exit never fired).
+        let euid = self.platform.effective_uid();
+        let mut to_resolve = HashSet::new();
+        for inode in pending {
+            let Some(&(_, _, uid)) = socket_meta.get(&inode) else {
+                continue;
+            };
+            if euid != 0 && uid != euid {
+                self.inode_retry.insert(inode, now + INODE_FOREIGN_RETRY);
+                continue;
+            }
+            if self
+                .inode_retry
+                .get(&inode)
+                .is_some_and(|until| *until > now)
+            {
+                continue;
+            }
+            to_resolve.insert(inode);
+        }
+
+        if to_resolve.is_empty() {
+            return None;
+        }
+
+        match self.platform.build_inode_map(&to_resolve) {
+            Ok(map) => {
+                for (inode, owners) in &map {
+                    let Some(&(pid, _fd)) = owners.first() else {
+                        continue;
+                    };
+                    let Some(&(port, protocol, uid)) = socket_meta.get(inode) else {
+                        continue;
+                    };
+                    self.inode_owners.insert(
+                        *inode,
+                        InodeOwner {
+                            pid,
+                            // Filled in after this scan reads the process
+                            // metadata; validation treats None as stale.
+                            starttime_jiffies: None,
+                            port,
+                            protocol,
+                            uid,
+                        },
+                    );
+                    self.inode_retry.remove(inode);
+                }
+                // A resolvable inode the walk did not find is a race or a
+                // `hidepid` restriction; do not retry it every tick.
+                for inode in &to_resolve {
+                    if !map.contains_key(inode) {
+                        self.inode_retry.insert(*inode, now + INODE_MISSING_RETRY);
+                    }
+                }
+                None
+            }
+            Err(error) => {
+                for inode in &to_resolve {
+                    self.inode_retry.insert(*inode, now + INODE_MISSING_RETRY);
+                }
+                Some(format!("{error:#}"))
+            }
         }
     }
 
@@ -536,6 +749,8 @@ fn merge_dual_stack(services: Vec<Service>) -> Vec<Service> {
 mod tests {
     use super::*;
     use crate::model::{BindScope, Protocol, TcpState};
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn socket(protocol: Protocol, port: u16, inode: u64) -> Socket {
         Socket {
@@ -740,5 +955,199 @@ mod tests {
         loopback.local_addr = std::net::Ipv4Addr::LOCALHOST.into();
         loopback.bind_scope = crate::model::BindScope::Loopback;
         assert!(engine.socket_passes_filters(&loopback));
+    }
+
+    /// A probe that delegates to the real Linux backend but counts how many
+    /// times the engine walks every fd table.
+    struct CountingProbe {
+        inner: LinuxProbe,
+        walks: Arc<AtomicUsize>,
+    }
+
+    impl CountingProbe {
+        fn new(root: &Path) -> Self {
+            Self {
+                inner: LinuxProbe::new(Some(root)),
+                walks: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl PlatformProbe for CountingProbe {
+        fn list_listening_sockets(&self, include_udp: bool) -> Result<Vec<Socket>> {
+            self.inner.list_listening_sockets(include_udp)
+        }
+
+        fn process_metadata(&self, pid: i32) -> Result<Process> {
+            self.inner.process_metadata(pid)
+        }
+
+        fn process_starttime(&self, pid: i32) -> Option<u64> {
+            self.inner.process_starttime(pid)
+        }
+
+        fn effective_uid(&self) -> u32 {
+            1000
+        }
+
+        fn container_of(&self, pid: i32) -> Option<crate::model::Container> {
+            self.inner.container_of(pid)
+        }
+
+        fn container_warning(&self) -> Option<Degradation> {
+            self.inner.container_warning()
+        }
+
+        fn signal(&self, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()> {
+            self.inner.signal(pid, expected_starttime, sig)
+        }
+
+        fn total_jiffies(&self) -> Option<u64> {
+            self.inner.total_jiffies()
+        }
+
+        fn build_inode_map(
+            &self,
+            interest: &HashSet<u64>,
+        ) -> Result<HashMap<u64, Vec<(i32, i32)>>> {
+            self.walks.fetch_add(1, Ordering::Relaxed);
+            self.inner.build_inode_map(interest)
+        }
+
+        fn num_cpus(&self) -> usize {
+            self.inner.num_cpus()
+        }
+
+        fn username_for_uid(&self, uid: u32) -> Option<String> {
+            self.inner.username_for_uid(uid)
+        }
+    }
+
+    /// A synthetic `proc_root` with TCP listeners. `our` sockets belong to the
+    /// effective UID; `foreign` sockets belong to another user and therefore
+    /// can never be resolved by this process.
+    fn synthetic_proc(our: &[(u16, i32, u64)], foreign: &[(u16, u64)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("stat"), "cpu  1 2 3 4\nbtime 1700000000\n").unwrap();
+        std::fs::create_dir_all(root.join("net")).unwrap();
+        std::fs::write(
+            root.join("net/tcp"),
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+        )
+        .unwrap();
+
+        for &(port, pid, inode) in our {
+            add_listener(root, port, pid, inode, 1000);
+        }
+        for &(port, inode) in foreign {
+            add_listener(root, port, 0, inode, 1001);
+        }
+        dir
+    }
+
+    fn add_listener(root: &Path, port: u16, pid: i32, inode: u64, uid: u32) {
+        let line = format!(
+            "   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  {uid}        0 {inode} 1 0000 100 0 0 10 0\n"
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join("net/tcp"))
+            .unwrap();
+        file.write_all(line.as_bytes()).unwrap();
+
+        if pid == 0 {
+            return;
+        }
+        let pid_dir = root.join(pid.to_string());
+        std::fs::create_dir_all(pid_dir.join("fd")).unwrap();
+        std::fs::write(
+            pid_dir.join("stat"),
+            format!("{pid} (svc) S 1 1 1 0 -1 0 0 0 0 0 10 20 0 0 20 0 1 0 12345 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"),
+        )
+        .unwrap();
+        std::fs::write(
+            pid_dir.join("status"),
+            "Name:\tsvc\nUid:\t1000\t1000\t1000\t1000\nVmRSS:\t1024 kB\nThreads:\t1\n",
+        )
+        .unwrap();
+        std::fs::write(pid_dir.join("cmdline"), b"node\x00server.js\x00").unwrap();
+        std::os::unix::fs::symlink(format!("socket:[{inode}]"), pid_dir.join("fd/3")).unwrap();
+    }
+
+    /// The whole point of P0: a stable socket set must not trigger a second
+    /// `/proc/<pid>/fd` walk. `scan_fresh` is the explicit revalidation.
+    #[test]
+    fn test_inode_map_is_cached_between_scans() {
+        let dir = synthetic_proc(&[(8080, 1234, 777001)], &[]);
+        let probe = CountingProbe::new(dir.path());
+        let walks = Arc::clone(&probe.walks);
+        let mut engine = Engine::from_platform(Box::new(probe), Config::default());
+
+        let first = engine.scan();
+        assert_eq!(first.services.len(), 1);
+        assert_eq!(walks.load(Ordering::Relaxed), 1);
+
+        let second = engine.scan();
+        assert_eq!(second.services.len(), 1);
+        assert_eq!(
+            walks.load(Ordering::Relaxed),
+            1,
+            "a stable socket set must reuse the cached inode map"
+        );
+
+        let _ = engine.scan_fresh();
+        assert_eq!(
+            walks.load(Ordering::Relaxed),
+            2,
+            "scan_fresh must revalidate against live /proc"
+        );
+    }
+
+    /// The bug that made the old early-exit unreachable: a socket owned by
+    /// another user can never be resolved, and must not force a full fd walk
+    /// on every refresh.
+    #[test]
+    fn test_foreign_socket_does_not_force_repeated_fd_walks() {
+        let dir = synthetic_proc(&[(8080, 1234, 777001)], &[(5353, 777999)]);
+        let probe = CountingProbe::new(dir.path());
+        let walks = Arc::clone(&probe.walks);
+        let mut engine = Engine::from_platform(Box::new(probe), Config::default());
+
+        let first = engine.scan();
+        assert_eq!(first.services.len(), 2, "both rows are still reported");
+        assert_eq!(walks.load(Ordering::Relaxed), 1);
+
+        let _ = engine.scan();
+        assert_eq!(
+            walks.load(Ordering::Relaxed),
+            1,
+            "the unreadable foreign inode must be skipped, not re-walked"
+        );
+    }
+
+    /// A newly started server is the one event that must pay a fresh walk,
+    /// and only once.
+    #[test]
+    fn test_new_socket_triggers_one_incremental_walk() {
+        let dir = synthetic_proc(&[(8080, 1234, 777001)], &[]);
+        let probe = CountingProbe::new(dir.path());
+        let walks = Arc::clone(&probe.walks);
+        let mut engine = Engine::from_platform(Box::new(probe), Config::default());
+
+        let _ = engine.scan();
+        assert_eq!(walks.load(Ordering::Relaxed), 1);
+
+        add_listener(dir.path(), 9090, 5678, 888001, 1000);
+        let snapshot = engine.scan();
+        assert_eq!(snapshot.services.len(), 2);
+        assert_eq!(
+            walks.load(Ordering::Relaxed),
+            2,
+            "the unknown inode must be resolved exactly once"
+        );
+
+        let _ = engine.scan();
+        assert_eq!(walks.load(Ordering::Relaxed), 2);
     }
 }

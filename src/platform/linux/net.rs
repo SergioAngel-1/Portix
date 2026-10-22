@@ -2,22 +2,28 @@ use crate::model::{Protocol, Socket, TcpState};
 use anyhow::Result;
 use std::path::Path;
 
-/// Parse /proc/net/tcp and /proc/net/tcp6 to find listening sockets.
-pub fn list_listening_sockets(proc_root: &Path) -> Result<Vec<Socket>> {
+/// Parse `/proc/net/tcp`, `tcp6` and, when requested, `udp`/`udp6` to find
+/// sockets offering a service.
+pub fn list_listening_sockets(proc_root: &Path, include_udp: bool) -> Result<Vec<Socket>> {
     let mut sockets = Vec::new();
     let mut any_ok = false;
     let mut last_err = None;
 
-    // Read all four families. A single missing one (a box with IPv6 disabled,
-    // say) degrades gracefully — modern servers bind `::`, so we must not stop at
-    // the first success either. But if not one of the four could be read, the
-    // scan genuinely failed: say so rather than report "0 services".
+    // A single missing family (a box with IPv6 disabled, say) degrades
+    // gracefully — modern servers bind `::`, so we must not stop at the first
+    // success either. But if not one of the requested files could be read, the
+    // scan genuinely failed: say so rather than report "0 services". UDP files
+    // are skipped entirely when the view hides UDP, instead of reading them
+    // only to filter every row out in the engine.
     for (file, protocol) in [
         ("tcp", Protocol::Tcp),
         ("tcp6", Protocol::Tcp6),
         ("udp", Protocol::Udp),
         ("udp6", Protocol::Udp6),
     ] {
+        if !include_udp && protocol.family() == crate::model::Family::Udp {
+            continue;
+        }
         match read_proc_net(proc_root, file, protocol) {
             Ok(s) => {
                 any_ok = true;
@@ -84,37 +90,35 @@ fn remote_endpoint(line: &str) -> Option<(&str, u16)> {
 
 /// Parse a single line from /proc/net/tcp* or /proc/net/udp*.
 pub fn parse_proc_net_line(line: &str, protocol: Protocol) -> Option<Socket> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 10 {
-        return None;
-    }
-
     // The format is: "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode"
-    // After splitting by whitespace:
-    // [0] = "0:" (sl)
-    // [1] = "0100007F:1F90" (local_address)
-    // [2] = "00000000:0000" (rem_address)
-    // [3] = "0A" (st - state)
-    // [4] = "00000000:00000000" (tx_queue)
-    // [5] = "00:00000000" (tr:tm->when)
-    // [6] = "00000000" (retrnsmt)
-    // [7] = "1000" (uid)
-    // [8] = "0" (timeout)
-    // [9] = "486312" (inode)
+    // [0] sl, [1] local_address, [2] rem_address, [3] state, [4] tx_queue,
+    // [5] tr:tm->when, [6] retrnsmt, [7] uid, [8] timeout, [9] inode.
+    //
+    // Consume lazily: these files can carry thousands of lines, and a
+    // `collect::<Vec<_>>()` per line allocates for every one of them on every
+    // scan. Only the five fields we need are ever visited.
+    let mut parts = line.split_whitespace();
+    let _sl = parts.next()?;
 
-    // Parse local_address (index 1): "ADDR:PORT" in hex
-    let local_addr_str = parts.get(1)?;
+    // Parse local_address: "ADDR:PORT" in hex
+    let local_addr_str = parts.next()?;
     let (addr_hex, port_hex) = local_addr_str.rsplit_once(':')?;
 
-    // Parse state (index 3)
-    let state_hex = parts.get(3)?;
+    let _remote_addr = parts.next()?;
+
+    let state_hex = parts.next()?;
     let state = TcpState::from_hex(state_hex)?;
 
-    // Parse uid (index 7)
-    let uid = parts.get(7)?.parse::<u32>().ok()?;
+    // tx_queue, tr:tm->when, retrnsmt
+    parts.next()?;
+    parts.next()?;
+    parts.next()?;
 
-    // Parse inode (index 9)
-    let inode = parts.get(9)?.parse::<u64>().ok()?;
+    let uid = parts.next()?.parse::<u32>().ok()?;
+
+    let _timeout = parts.next()?;
+
+    let inode = parts.next()?.parse::<u64>().ok()?;
 
     // Parse port (big-endian hex)
     let port = u16::from_str_radix(port_hex, 16).ok()?;
