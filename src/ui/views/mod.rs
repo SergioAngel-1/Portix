@@ -1,3 +1,4 @@
+pub mod app_view;
 pub mod confirm_modal;
 pub mod detail_panel;
 pub mod help;
@@ -5,6 +6,8 @@ pub mod main_table;
 pub mod search_bar;
 pub mod status_bar;
 pub mod theme_picker;
+
+pub use app_view::render_app;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
