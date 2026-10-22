@@ -47,13 +47,13 @@ run_build() {
             runuser -u "$SUDO_USER" -- env HOME="$BUILD_HOME" \
                 CARGO_HOME="${BUILD_HOME}/.cargo" \
                 PATH="${BUILD_HOME}/.cargo/bin:/usr/local/bin:/usr/bin:/bin:$PATH" \
-                cargo build "${BUILD_ARGS[@]}"
+                cargo build --locked "${BUILD_ARGS[@]}"
             return
         fi
     fi
 
     echo "==> cargo build ${BUILD_ARGS[*]}"
-    cargo build "${BUILD_ARGS[@]}"
+    cargo build --locked "${BUILD_ARGS[@]}"
 }
 
 # Remove only exact Portix cache/state directories. Configuration is explicitly
@@ -355,6 +355,14 @@ clear_all_runtime_caches() {
     fi
 }
 
+# Escape a value for the replacement side of a sed s/// command: an unescaped
+# `|` ends the expression early, `&` expands to the matched text, and a
+# backslash escapes whatever follows, so a BIN_DIR containing any of them would
+# corrupt the generated desktop file.
+sed_replacement() {
+    printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'
+}
+
 render_desktop() {
     local template="$1"
     local destination="$2"
@@ -362,10 +370,16 @@ render_desktop() {
     local launch="$4"
     local update="$5"
     local autostart="$6"
-    sed -e "s|@PORTIX_BIN@|$binary|g" \
-        -e "s|@PORTIX_LAUNCH@|$launch|g" \
-        -e "s|@PORTIX_UPDATE@|$update|g" \
-        -e "s|@PORTIX_AUTOSTART@|$autostart|g" \
+    local binary_escaped launch_escaped update_escaped autostart_escaped
+
+    binary_escaped="$(sed_replacement "$binary")"
+    launch_escaped="$(sed_replacement "$launch")"
+    update_escaped="$(sed_replacement "$update")"
+    autostart_escaped="$(sed_replacement "$autostart")"
+    sed -e "s|@PORTIX_BIN@|$binary_escaped|g" \
+        -e "s|@PORTIX_LAUNCH@|$launch_escaped|g" \
+        -e "s|@PORTIX_UPDATE@|$update_escaped|g" \
+        -e "s|@PORTIX_AUTOSTART@|$autostart_escaped|g" \
         "$template" > "$destination"
 }
 
@@ -418,13 +432,17 @@ install_system_integration() {
     if [ "${#PRIV[@]}" -gt 0 ]; then
         tmp_desktop="$(mktemp)"
         tmp_icon_index="$(mktemp)"
+        # `set -e` aborts on the first failed privileged install; without this
+        # trap the rendered desktop file and icon index leak into $TMPDIR.
+        trap 'rm -f -- "$tmp_desktop" "$tmp_icon_index"' EXIT
         render_desktop "$PROJECT_ROOT/packaging/desktop/portix.desktop.in" "$tmp_desktop" "$binary" "$launch" "$update" "$autostart_cmd"
         cp "$PROJECT_ROOT/packaging/desktop/index.theme" "$tmp_icon_index"
         run_priv install -m 0644 "$tmp_desktop" "$applications/portix.desktop"
         run_priv install -m 0644 "$tmp_icon_index" "$icons/index.theme"
         run_priv install -m 0644 "$PROJECT_ROOT/packaging/desktop/icons/hicolor/256x256/apps/portix.png" "$icons/256x256/apps/portix.png"
         run_priv install -m 0644 "$PROJECT_ROOT/packaging/desktop/icons/hicolor/512x512/apps/portix.png" "$icons/512x512/apps/portix.png"
-        rm -f "$tmp_desktop" "$tmp_icon_index"
+        rm -f -- "$tmp_desktop" "$tmp_icon_index"
+        trap - EXIT
     else
         render_desktop "$PROJECT_ROOT/packaging/desktop/portix.desktop.in" "$applications/portix.desktop" "$binary" "$launch" "$update" "$autostart_cmd"
         install -m 0644 "$PROJECT_ROOT/packaging/desktop/index.theme" "$icons/index.theme"

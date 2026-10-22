@@ -47,6 +47,32 @@ expect_not_portix 'editor on a Portix source file' vim portix.rs
 expect_not_portix 'shell running a Portix command' bash -c portix
 expect_not_portix 'empty argv'
 
+# A BIN_DIR containing sed metacharacters must not break or corrupt the
+# generated desktop entry.
+test_render_desktop() {
+    local tmpdir template destination binary launch update autostart
+
+    binary='a&b|c\d'
+    launch="$binary --run"
+    update="$binary --update"
+    autostart="$binary --autostart"
+    tmpdir="$(mktemp -d)"
+    template="$tmpdir/portix.desktop.in"
+    destination="$tmpdir/portix.desktop"
+    printf 'Exec=@PORTIX_LAUNCH@\nTryExec=@PORTIX_BIN@\nUpdate=@PORTIX_UPDATE@\nAutostart=@PORTIX_AUTOSTART@\n' > "$template"
+    render_desktop "$template" "$destination" "$binary" "$launch" "$update" "$autostart"
+    if ! grep -Fxq "TryExec=$binary" "$destination" ||
+        ! grep -Fxq "Exec=$launch" "$destination" ||
+        ! grep -Fxq "Update=$update" "$destination" ||
+        ! grep -Fxq "Autostart=$autostart" "$destination"; then
+        printf 'FAIL: render_desktop corrupted a path with sed metacharacters\n' >&2
+        failures=$((failures + 1))
+    fi
+    rm -rf -- "$tmpdir"
+}
+
+test_render_desktop
+
 if [ "$failures" -ne 0 ]; then
     printf '%d test(s) failed\n' "$failures" >&2
     exit 1
