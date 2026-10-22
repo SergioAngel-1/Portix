@@ -38,15 +38,7 @@ impl Signal {
 pub fn send_signal(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()> {
     // Cheap snapshot check first: most mismatches are caught here without
     // touching a syscall.
-    let actual = super::proc::read_starttime_jiffies(proc_root, pid)
-        .ok_or_else(|| anyhow!("process {pid} no longer exists"))?;
-
-    if actual != expected_starttime {
-        return Err(anyhow!(
-            "refusing to signal PID {pid}: it was replaced by a different process \
-             (start time {actual} != {expected_starttime})"
-        ));
-    }
+    verify_identity(proc_root, pid, expected_starttime)?;
 
     // Pin the process. From here on the fd, not the PID, is the identity.
     // SAFETY: pidfd_open(2) with a positive pid and flags=0; the fd is owned
@@ -81,14 +73,7 @@ pub fn send_signal(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Sig
     // recycled between the snapshot check and pidfd_open, the pin is the new
     // process and /proc now shows it: mismatch, refuse. If the pinned process
     // died meanwhile, the read fails or shows a recycled PID: mismatch, refuse.
-    let actual = super::proc::read_starttime_jiffies(proc_root, pid)
-        .ok_or_else(|| anyhow!("process {pid} no longer exists"))?;
-    if actual != expected_starttime {
-        return Err(anyhow!(
-            "refusing to signal PID {pid}: it was replaced by a different process \
-             (start time {actual} != {expected_starttime})"
-        ));
-    }
+    verify_identity(proc_root, pid, expected_starttime)?;
 
     // SAFETY: pidfd_send_signal(2) on a live pidfd we own, with a valid signal
     // and a NULL siginfo (default semantics, like kill). If the pinned process
@@ -117,15 +102,7 @@ pub fn send_signal(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Sig
 /// TOCTOU guard as before, with the unavoidable microsecond window between
 /// the read and the syscall.
 fn signal_via_kill(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Signal) -> Result<()> {
-    let actual = super::proc::read_starttime_jiffies(proc_root, pid)
-        .ok_or_else(|| anyhow!("process {pid} no longer exists"))?;
-
-    if actual != expected_starttime {
-        return Err(anyhow!(
-            "refusing to signal PID {pid}: it was replaced by a different process \
-             (start time {actual} != {expected_starttime})"
-        ));
-    }
+    verify_identity(proc_root, pid, expected_starttime)?;
 
     // SAFETY: kill(2) with a positive pid and a valid signal number, on a pid
     // we just verified to be the process we intend to signal.
@@ -134,6 +111,25 @@ fn signal_via_kill(proc_root: &Path, pid: i32, expected_starttime: u64, sig: Sig
 
     if rc == -1 {
         return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+/// Re-read the starttime and refuse unless it still matches `expected`.
+///
+/// Three checkpoints share this check (pre-open, post-`pidfd_open`, and the
+/// `kill(2)` fallback). Keeping it in one place keeps the messages identical:
+/// "no longer exists" for a vanished PID, "replaced by a different process"
+/// for a recycled one, whichever checkpoint saw it.
+fn verify_identity(proc_root: &Path, pid: i32, expected: u64) -> Result<()> {
+    let actual = super::proc::read_starttime_jiffies(proc_root, pid)
+        .ok_or_else(|| anyhow!("process {pid} no longer exists"))?;
+
+    if actual != expected {
+        return Err(anyhow!(
+            "refusing to signal PID {pid}: it was replaced by a different process \
+             (start time {actual} != {expected})"
+        ));
     }
     Ok(())
 }
