@@ -560,10 +560,43 @@ fn run_update(all_contexts: bool) -> Result<i32> {
 /// Refresh cadence while the terminal is unfocused.
 ///
 /// The table is not being looked at, so a five-second cadence keeps it warm
-/// while letting the machine idle. Focus gain is detected by the collector
-/// within its 50 ms sleep slice, so returning to the terminal refreshes
-/// immediately instead of waiting out the idle interval.
+/// while letting the machine idle. The collector sleeps in
+/// `recv_timeout` until the next scan is due, so a focus event wakes it at
+/// once: returning to the terminal does not wait out the idle interval.
 const UNFOCUSED_REFRESH: Duration = Duration::from_secs(5);
+
+/// What the UI thread tells the collector to do.
+///
+/// The collector used to poll two `AtomicBool`s in 50 ms slices, which cost
+/// 20 wakeups per second even on an idle, unfocused terminal. A channel makes
+/// every control decision an event: the collector blocks until its next scan
+/// is due or one of these arrives.
+enum Control {
+    /// The UI is going away: wake up and return.
+    Shutdown,
+    /// The terminal gained or lost focus; re-evaluate the cadence (regaining
+    /// focus scans immediately when the last snapshot is already stale).
+    Focus(bool),
+    /// `r` was pressed: run `scan_fresh()` and send the snapshot. Forcing a
+    /// full inode revalidation on the UI thread would freeze input for the
+    /// duration of the walk.
+    RefreshNow,
+}
+
+/// How long the collector may wait before its next scan.
+///
+/// A focused terminal scans every `refresh`; a backgrounded one is not worth
+/// more than one scan per [`UNFOCUSED_REFRESH`]. Saturating at zero makes an
+/// overdue scan run immediately, which is also how regaining focus refreshes a
+/// stale table without waiting out the idle interval.
+fn scan_delay(last_scan: Instant, now: Instant, focused: bool, refresh: Duration) -> Duration {
+    let interval = if focused {
+        refresh
+    } else {
+        refresh.max(UNFOCUSED_REFRESH)
+    };
+    interval.saturating_sub(now.saturating_duration_since(last_scan))
+}
 
 fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<()> {
     if !io::stdout().is_terminal() {
@@ -608,14 +641,11 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
     // holding the lock).
     let engine = Arc::new(Mutex::new(engine));
     let refresh = Duration::from_millis(config.min_refresh_ms());
-    let focused = Arc::new(AtomicBool::new(true));
     let (tx, rx) = mpsc::channel();
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let (ctrl_tx, ctrl_rx) = mpsc::channel();
     let collector = {
         let engine = Arc::clone(&engine);
-        let shutdown = Arc::clone(&shutdown);
-        let focused = Arc::clone(&focused);
-        thread::spawn(move || collector_loop(engine, tx, refresh, shutdown, focused))
+        thread::spawn(move || collector_loop(engine, tx, refresh, ctrl_rx))
     };
 
     let result = event_loop(
@@ -623,10 +653,10 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
         config,
         &engine,
         rx,
+        &ctrl_tx,
         theme,
         color,
         interrupted,
-        &focused,
     );
 
     // Restore the terminal even if the loop failed. Leaving a user in raw mode
@@ -640,9 +670,10 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
     )?;
     terminal.show_cursor()?;
 
-    // Stop the collector (it sleeps in short slices, so this returns quickly)
-    // and wait for it to release the engine before `result` is returned.
-    shutdown.store(true, Ordering::Relaxed);
+    // Stop the collector: it is blocked in `recv_timeout`, so this wakes it at
+    // once instead of waiting out the refresh interval, then wait for it to
+    // release the engine before `result` is returned.
+    let _ = ctrl_tx.send(Control::Shutdown);
     let _ = collector.join();
 
     result
@@ -651,44 +682,55 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
 /// The periodic scan loop, off the UI thread.
 ///
 /// Scans run back-to-back with a pause between them; each snapshot is handed
-/// to the UI over the channel. The engine is locked only for the duration of
-/// each scan, so the UI thread can still lock it for the synchronous kill-path
-/// re-scans (`Effect::KillRequest` / `Effect::Kill`).
+/// to the UI over the snapshot channel. The engine is locked only for the
+/// duration of each scan, so the UI thread can still lock it for the
+/// synchronous kill-path re-scans (`Effect::KillRequest` / `Effect::Kill`).
 ///
 /// The pause adapts to terminal focus: `refresh` while focused, at least
-/// [`UNFOCUSED_REFRESH`] while backgrounded. It is re-evaluated in 50 ms
-/// slices, so both shutdown and focus gain are honoured promptly (a return to
-/// the terminal does not wait out the idle interval).
+/// [`UNFOCUSED_REFRESH`] while backgrounded. The collector blocks in
+/// `recv_timeout` for exactly [`scan_delay`], so it wakes only when the next
+/// scan is due or the UI sends a [`Control`] — no idle polling, and a focus
+/// change is honoured at once. A closed control channel means the UI is gone.
 fn collector_loop(
     engine: Arc<Mutex<Engine>>,
     tx: mpsc::Sender<SharedSnapshot>,
     refresh: Duration,
-    shutdown: Arc<AtomicBool>,
-    focused: Arc<AtomicBool>,
+    ctrl_rx: mpsc::Receiver<Control>,
 ) {
+    let mut focused = true;
+    let mut last_scan: Option<Instant> = None;
+
     loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
-        let snapshot = engine.lock().unwrap_or_else(|p| p.into_inner()).scan();
-        if tx.send(snapshot).is_err() {
-            break; // The UI is gone; nothing left to feed.
-        }
-        let last_scan = Instant::now();
-        loop {
-            if shutdown.load(Ordering::Relaxed) {
-                return;
+        // The first iteration has no snapshot yet and scans immediately.
+        let wait = last_scan.map_or(Duration::ZERO, |at| {
+            scan_delay(at, Instant::now(), focused, refresh)
+        });
+        if wait.is_zero() {
+            let snapshot = engine.lock().unwrap_or_else(|p| p.into_inner()).scan();
+            if tx.send(snapshot).is_err() {
+                return; // The UI is gone; nothing left to feed.
             }
-            let interval = if focused.load(Ordering::Relaxed) {
-                refresh
-            } else {
-                refresh.max(UNFOCUSED_REFRESH)
-            };
-            let elapsed = last_scan.elapsed();
-            if elapsed >= interval {
-                break;
+            last_scan = Some(Instant::now());
+            continue;
+        }
+
+        match ctrl_rx.recv_timeout(wait) {
+            Ok(Control::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Ok(Control::Focus(current)) => focused = current,
+            Ok(Control::RefreshNow) => {
+                // `r` is the recovery action for a stale ownership cache: the
+                // forced refresh must bypass the inode cache, not just the
+                // pause.
+                let snapshot = engine
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .scan_fresh();
+                if tx.send(snapshot).is_err() {
+                    return;
+                }
+                last_scan = Some(Instant::now());
             }
-            thread::sleep((interval - elapsed).min(Duration::from_millis(50)));
+            Err(mpsc::RecvTimeoutError::Timeout) => {} // a scan is due
         }
     }
 }
@@ -713,19 +755,19 @@ fn drain_snapshots(rx: &mpsc::Receiver<SharedSnapshot>, app: &mut App) -> Result
     }
 }
 
-// The loop owns the terminal, the shared engine, the snapshot channel and the
-// two atomic flags; splitting them into a context struct would only move the
-// same state one level down.
+// The loop owns the terminal, the shared engine, the snapshot and control
+// channels and the interruption flag; splitting them into a context struct
+// would only move the same state one level down.
 #[allow(clippy::too_many_arguments)]
 fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     config: Config,
     engine: &Arc<Mutex<Engine>>,
     rx: mpsc::Receiver<SharedSnapshot>,
+    ctrl_tx: &mpsc::Sender<Control>,
     theme: Theme,
     color: bool,
     interrupted: Arc<AtomicBool>,
-    focused: &Arc<AtomicBool>,
 ) -> Result<()> {
     let mut app = App::new(config.clone(), theme, color);
 
@@ -734,6 +776,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     // first scan fills the table within one scan duration. Input is never
     // blocked by the scan, which runs on its own thread.
     let mut dirty = true;
+    // Local mirror of the terminal focus, for this loop's own poll timeout.
+    // The collector keeps its own copy, updated through `Control::Focus`.
+    let mut focused = true;
 
     loop {
         // A termination signal (SIGTERM/SIGHUP/kill -INT) must exit through
@@ -761,7 +806,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         // costing only a handful of near-zero-cost wakeups per second (no
         // redraw happens unless something changed). A backgrounded terminal
         // polls less often; focus events still wake it.
-        let timeout = if focused.load(Ordering::Relaxed) {
+        let timeout = if focused {
             refresh.min(Duration::from_millis(100))
         } else {
             Duration::from_millis(250)
@@ -781,17 +826,23 @@ fn event_loop<B: ratatui::backend::Backend>(
 
                     for effect in app.handle_key(key) {
                         // `Quit` must leave the loop, not just this `for`.
-                        if run_effect(effect, &mut app, engine) == ControlFlow::Quit {
+                        if run_effect(effect, &mut app, engine, ctrl_tx) == ControlFlow::Quit {
                             return Ok(());
                         }
                     }
                     dirty = true;
                 }
-                // The terminal gained focus: the collector re-evaluates its
-                // pause on the next 50 ms slice and scans immediately if the
-                // last snapshot is older than the focused interval.
-                Event::FocusGained => focused.store(true, Ordering::Relaxed),
-                Event::FocusLost => focused.store(false, Ordering::Relaxed),
+                // The terminal gained focus: tell the collector, which
+                // re-evaluates its cadence and scans immediately if the last
+                // snapshot is older than the focused interval.
+                Event::FocusGained => {
+                    focused = true;
+                    let _ = ctrl_tx.send(Control::Focus(true));
+                }
+                Event::FocusLost => {
+                    focused = false;
+                    let _ = ctrl_tx.send(Control::Focus(false));
+                }
                 // A resize needs a redraw even if no snapshot arrived — while
                 // backgrounded, waiting for the next scan could leave a stale
                 // frame for seconds.
@@ -844,7 +895,12 @@ fn confirmed_owner_mismatch(service: &Service, expected: Option<(i32, u64)>) -> 
     }
 }
 
-fn run_effect(effect: Effect, app: &mut App, engine: &Arc<Mutex<Engine>>) -> ControlFlow {
+fn run_effect(
+    effect: Effect,
+    app: &mut App,
+    engine: &Arc<Mutex<Engine>>,
+    ctrl_tx: &mpsc::Sender<Control>,
+) -> ControlFlow {
     match effect {
         Effect::Quit => return ControlFlow::Quit,
 
@@ -904,15 +960,12 @@ fn run_effect(effect: Effect, app: &mut App, engine: &Arc<Mutex<Engine>>) -> Con
         }
 
         Effect::Refresh => {
-            // A manual refresh is user-initiated, so an inline scan is fine —
-            // it locks the engine away from the collector for one scan. It
-            // forces a full inode revalidation: `r` is the recovery action for
-            // a stale ownership cache.
-            let snapshot = engine
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .scan_fresh();
-            app.update_snapshot(snapshot);
+            // `r` is user-initiated, but a forced full inode walk on the UI
+            // thread would freeze input for its whole duration. Hand it to the
+            // collector, which runs `scan_fresh()` and sends the snapshot back
+            // through the normal channel. A failed send means the collector is
+            // gone; the event loop reports that when the channel disconnects.
+            let _ = ctrl_tx.send(Control::RefreshNow);
         }
 
         Effect::PersistConfig => {
@@ -1179,6 +1232,70 @@ mod tests {
         let mut input = io::Cursor::new(b"n\n".to_vec());
         let code = kill_port_with_stdin(engine, 8080, false, false, true, &mut input).unwrap();
         assert_eq!(code, exit::ERROR);
+    }
+
+    /// Focused: wait out the remainder of the configured refresh interval.
+    #[test]
+    fn test_scan_delay_uses_focused_interval() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(200);
+        assert_eq!(
+            scan_delay(last, now, true, Duration::from_secs(1)),
+            Duration::from_millis(800)
+        );
+    }
+
+    /// Unfocused: the idle interval is the floor even when `refresh` is much
+    /// shorter — a backgrounded terminal is not worth 20 scans a second.
+    #[test]
+    fn test_scan_delay_backs_off_when_unfocused() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(200);
+        assert_eq!(
+            scan_delay(last, now, false, Duration::from_secs(1)),
+            Duration::from_millis(4_800)
+        );
+    }
+
+    /// An overdue scan has a zero delay (run it now, do not wait a negative
+    /// time), and a configured refresh slower than the unfocused floor wins.
+    #[test]
+    fn test_scan_delay_is_saturating_and_honours_slow_refresh() {
+        let last = Instant::now();
+        assert_eq!(
+            scan_delay(
+                last,
+                last + Duration::from_secs(3),
+                true,
+                Duration::from_secs(1)
+            ),
+            Duration::ZERO
+        );
+        assert_eq!(
+            scan_delay(last, last, false, Duration::from_secs(10)),
+            Duration::from_secs(10)
+        );
+    }
+
+    /// The collector blocks in `recv_timeout`; `Shutdown` must wake it instead
+    /// of leaving the UI to wait out a long refresh interval at exit.
+    #[test]
+    fn test_collector_exits_promptly_on_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(Mutex::new(Engine::new(Some(dir.path()), Config::default())));
+        let (tx, _rx) = mpsc::channel();
+        let (ctrl_tx, ctrl_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let collector = thread::spawn(move || {
+            collector_loop(engine, tx, Duration::from_secs(30), ctrl_rx);
+            let _ = done_tx.send(());
+        });
+
+        ctrl_tx.send(Control::Shutdown).unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("collector must stop on Control::Shutdown");
+        collector.join().unwrap();
     }
 
     fn test_app() -> App {
