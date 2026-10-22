@@ -57,19 +57,27 @@ struct DockerApiPort {
     protocol: String,
 }
 
+/// Per-operation timeout for the Docker Desktop API.
+///
+/// This call sits on the scan path: a hung Docker Desktop must not stall the
+/// collector for a quarter of a second on every refresh. The engine also
+/// caches both hits and misses, so this timeout is only paid on a cache miss.
+const DOCKER_API_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Read Docker Desktop's local API endpoint and list running containers with
 /// published ports. This uses only a Unix socket; it never opens a TCP socket.
 pub fn read_docker_desktop(socket: Option<&Path>) -> Option<DockerDesktopData> {
     let socket = socket
         .map(PathBuf::from)
         .or_else(default_docker_desktop_socket)?;
+    // A missing socket is the common native-Linux case. Checking first avoids
+    // building a connection attempt (and an error) on every refresh.
+    if !socket.exists() {
+        return None;
+    }
     let mut stream = UnixStream::connect(socket).ok()?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_millis(250)))
-        .ok()?;
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_millis(250)))
-        .ok()?;
+    stream.set_read_timeout(Some(DOCKER_API_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(DOCKER_API_TIMEOUT)).ok()?;
 
     let request = b"GET /v1.41/containers/json?all=0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     stream.write_all(request).ok()?;

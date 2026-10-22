@@ -34,6 +34,15 @@ const INODE_MISSING_RETRY: Duration = Duration::from_secs(30);
 /// by this process forever, so retrying them can only burn syscalls.
 const INODE_FOREIGN_RETRY: Duration = Duration::from_secs(3600);
 
+/// How long a successful Docker Desktop container list is reused.
+const DOCKER_DESKTOP_TTL: Duration = Duration::from_secs(15);
+
+/// How long a failed/absent Docker Desktop API is not retried.
+///
+/// Native Linux usually has no Docker Desktop socket at all; probing it every
+/// second buys nothing. A minute still discovers a Desktop that starts later.
+const DOCKER_DESKTOP_NEGATIVE_TTL: Duration = Duration::from_secs(60);
+
 /// Cached owner of a listening socket's inode.
 ///
 /// `(pid, starttime)` is the same identity the kill path pins: a recycled PID
@@ -62,6 +71,10 @@ pub struct Engine {
     /// heuristic walks all of `/proc` (cgroup + cmdline of every pid) and is
     /// far too expensive to run on every refresh.
     container_warning: Option<(Instant, Option<Degradation>)>,
+    /// Last Docker Desktop published-port mapping, with the `Instant` it was
+    /// fetched. The query talks to a Unix socket and may block for the whole
+    /// API timeout; it cannot run on every refresh.
+    docker_desktop: Option<(Instant, Option<DockerDesktopData>)>,
     /// Cached `socket inode → owning process`. A full `/proc/<pid>/fd` walk is
     /// O(every descriptor on the box); it only has to run when a socket we do
     /// not know about appears (or on the periodic revalidation), not on every
@@ -95,6 +108,7 @@ impl Engine {
             config,
             num_cpus,
             container_warning: None,
+            docker_desktop: None,
             inode_owners: HashMap::new(),
             inode_retry: HashMap::new(),
             last_inode_revalidate: Instant::now(),
@@ -191,7 +205,7 @@ impl Engine {
         // Docker Desktop exposes the published-port mapping through its local
         // Unix socket. It is optional and best-effort: a missing/blocked API
         // must never prevent the /proc scan from producing a snapshot.
-        let docker_desktop: Option<DockerDesktopData> = read_docker_desktop(None);
+        let docker_desktop = self.docker_desktop_cached();
 
         let sockets: Vec<Socket> = if apply_filters {
             sockets
@@ -515,6 +529,28 @@ impl Engine {
             return false;
         }
         true
+    }
+
+    /// The Docker Desktop mapping, reused for [`DOCKER_DESKTOP_TTL`] on
+    /// success and [`DOCKER_DESKTOP_NEGATIVE_TTL`] when the API is absent.
+    ///
+    /// Native Linux boxes usually have no Desktop socket; without the negative
+    /// cache every refresh would pay a failed `connect` for nothing. A minute
+    /// is short enough to notice a Desktop that starts later.
+    fn docker_desktop_cached(&mut self) -> Option<DockerDesktopData> {
+        if let Some((at, data)) = &self.docker_desktop {
+            let ttl = if data.is_some() {
+                DOCKER_DESKTOP_TTL
+            } else {
+                DOCKER_DESKTOP_NEGATIVE_TTL
+            };
+            if at.elapsed() < ttl {
+                return data.clone();
+            }
+        }
+        let data = read_docker_desktop(None);
+        self.docker_desktop = Some((Instant::now(), data.clone()));
+        data
     }
 
     /// The container warning, recomputed at most once per 10 s.
