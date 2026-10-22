@@ -107,12 +107,7 @@ fn choose_browser_command(
     None
 }
 
-fn browser_command() -> Option<String> {
-    let is_kde = env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
-        desktop
-            .split(':')
-            .any(|name| name.eq_ignore_ascii_case("kde"))
-    });
+fn browser_command(is_kde: bool) -> Option<String> {
     choose_browser_command(
         env::var("BROWSER").ok().as_deref(),
         is_kde,
@@ -144,6 +139,48 @@ fn select_clipboard_backend(
     } else {
         None
     }
+}
+
+/// Build the ordered clipboard backends to try.
+///
+/// The selected backend is tried first, then the explicit Wayland/X11 helpers
+/// as fallbacks. A helper can be both the selected backend and a fallback
+/// (e.g. `xclip` selected outside KDE), so duplicates are skipped here instead
+/// of being attempted twice; availability is already resolved by the caller so
+/// each tool is looked up on `PATH` once, not once per candidate.
+fn clipboard_candidates(
+    is_kde: bool,
+    qdbus6_available: bool,
+    qdbus_available: bool,
+    dbus_send_available: bool,
+    wl_copy_available: bool,
+    xclip_available: bool,
+    xsel_available: bool,
+) -> Vec<ClipboardBackend> {
+    let mut candidates = Vec::new();
+    let selected = select_clipboard_backend(
+        is_kde,
+        qdbus6_available,
+        qdbus_available,
+        dbus_send_available,
+        wl_copy_available,
+        xclip_available,
+        xsel_available,
+    );
+    for backend in [
+        selected,
+        wl_copy_available.then_some(ClipboardBackend::WlCopy),
+        xclip_available.then_some(ClipboardBackend::Xclip),
+        xsel_available.then_some(ClipboardBackend::Xsel),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !candidates.contains(&backend) {
+            candidates.push(backend);
+        }
+    }
+    candidates
 }
 
 fn run_clipboard_backend(backend: ClipboardBackend, text: &str) -> bool {
@@ -254,7 +291,7 @@ pub fn open_url(url: &str) -> Result<()> {
     // unable to hand the URL to an already-running browser. Prefer the explicit
     // browser command when one is discoverable; unlike `kioclient`, Chrome's
     // launcher has a direct, testable `--new-tab URL` contract.
-    let mut command = if let Some(browser) = browser_command() {
+    let mut command = if let Some(browser) = browser_command(is_kde) {
         let mut command = Command::new(browser);
         command.args(["--new-tab", url]);
         command
@@ -285,9 +322,17 @@ pub fn open_url(url: &str) -> Result<()> {
 
     // Keep stdin inherited for desktop/browser session integration, but silence
     // output so launcher diagnostics cannot overwrite the alternate screen.
-    silence_launcher_output(&mut command)
+    let mut child = silence_launcher_output(&mut command)
         .spawn()
         .with_context(|| format!("Failed to open {url}"))?;
+
+    // The launcher is fire-and-forget, but dropping the `Child` without waiting
+    // leaves a zombie behind on every `o` keypress until Portix exits. Reap it
+    // on its own thread: `wait()` blocks until the browser exits, which can be
+    // minutes, and this runs on the UI thread.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 
     Ok(())
 }
@@ -305,23 +350,20 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
         env::var("KDE_FULL_SESSION").ok().as_deref(),
     );
 
-    let candidates = [
-        select_clipboard_backend(
-            is_kde,
-            command_available("qdbus6"),
-            command_available("qdbus"),
-            command_available("dbus-send"),
-            command_available("wl-copy"),
-            command_available("xclip"),
-            command_available("xsel"),
-        ),
-        command_available("wl-copy").then_some(ClipboardBackend::WlCopy),
-        command_available("xclip").then_some(ClipboardBackend::Xclip),
-        command_available("xsel").then_some(ClipboardBackend::Xsel),
-    ];
+    // Resolve each tool once: `command_available` walks `PATH`, and the old
+    // candidate list called it twice for every fallback.
+    let candidates = clipboard_candidates(
+        is_kde,
+        command_available("qdbus6"),
+        command_available("qdbus"),
+        command_available("dbus-send"),
+        command_available("wl-copy"),
+        command_available("xclip"),
+        command_available("xsel"),
+    );
 
     let mut attempted = false;
-    for backend in candidates.into_iter().flatten() {
+    for backend in candidates {
         attempted = true;
         if run_clipboard_backend(backend, text) {
             return Ok(());
@@ -409,6 +451,41 @@ mod tests {
         assert_eq!(
             super::select_clipboard_backend(false, false, false, false, true, false, false),
             Some(super::ClipboardBackend::WlCopy)
+        );
+    }
+
+    #[test]
+    fn clipboard_candidates_keep_order_and_skip_the_selected_fallback_duplicate() {
+        // Outside KDE `wl-copy` is selected; it must not be attempted twice
+        // when it also appears in the explicit fallback list.
+        assert_eq!(
+            super::clipboard_candidates(false, false, false, false, true, true, false),
+            vec![
+                super::ClipboardBackend::WlCopy,
+                super::ClipboardBackend::Xclip
+            ]
+        );
+        // `xclip` selected with `xsel` available: xclip once, then xsel.
+        assert_eq!(
+            super::clipboard_candidates(false, false, false, false, false, true, true),
+            vec![
+                super::ClipboardBackend::Xclip,
+                super::ClipboardBackend::Xsel
+            ]
+        );
+    }
+
+    #[test]
+    fn clipboard_candidates_try_the_kde_backend_before_external_tools() {
+        assert_eq!(
+            super::clipboard_candidates(true, true, false, false, true, false, false),
+            vec![
+                super::ClipboardBackend::KlipperQdbus6,
+                super::ClipboardBackend::WlCopy
+            ]
+        );
+        assert!(
+            super::clipboard_candidates(false, false, false, false, false, false, false).is_empty()
         );
     }
 
