@@ -170,7 +170,10 @@ is_portix_process() {
 parent_pid() {
     local pid="$1"
     local stat suffix _ ppid _rest
-    stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    # Read with a builtin: `cat` forked once per ancestor per pid, which made
+    # the protected-chain walk cost thousands of processes on a full box. The
+    # group keeps a vanished PID's redirection error out of stderr.
+    { read -r stat < "/proc/$pid/stat"; } 2>/dev/null || return 1
     [ -n "$stat" ] || return 1
     suffix="${stat##*) }"
     read -r _ ppid _rest <<< "$suffix"
@@ -180,22 +183,27 @@ parent_pid() {
     esac
 }
 
-is_protected_pid() {
-    local candidate="$1"
+# Ancestors of this script and of the updater PID. The set is identical for
+# every /proc entry, so it is computed once before a scan instead of per pid.
+declare -A PROTECTED_PIDS=()
+
+compute_protected_pids() {
+    local keep_pid="$1"
     local root current parent
 
-    for root in "$self_pid" "$keep_pid"; do
+    PROTECTED_PIDS=()
+
+    for root in "$$" "$keep_pid"; do
         [ "$root" != 0 ] || continue
         current="$root"
         while [ "$current" -gt 1 ] 2>/dev/null; do
-            [ "$current" != "$candidate" ] || return 0
+            PROTECTED_PIDS["$current"]=1
             parent="$(parent_pid "$current" || true)"
             [ -n "$parent" ] || break
             [ "$parent" != "$current" ] || break
             current="$parent"
         done
     done
-    return 1
 }
 
 pid_alive() {
@@ -224,20 +232,21 @@ send_signal() {
 
 can_manage_pid() {
     local pid="$1"
-    local owner
-    owner="$(stat -c '%u' "/proc/$pid" 2>/dev/null || true)"
-    [ "$owner" = "$(id -u)" ] || [ "${EUID:-$(id -u)}" -eq 0 ] || [ "${#PRIV[@]}" -gt 0 ]
+    # `[[ -O ]]` is a builtin owner test, so the kill path does not fork `stat`
+    # per pid. Root and a sudo-capable caller can manage any owner.
+    [ "${EUID:-$(id -u)}" -eq 0 ] || [ "${#PRIV[@]}" -gt 0 ] || [ -O "/proc/$pid" ]
 }
 
 stop_existing_portix() {
     local keep_pid="${UPDATE_KEEP_PID:-0}"
-    local self_pid="$$"
     local pid
     local -a pids=()
 
     case "$keep_pid" in
         ''|*[!0-9]*) keep_pid=0 ;;
     esac
+
+    compute_protected_pids "$keep_pid"
 
     # `/proc` is used instead of `pkill portix`: it lets us retain the updater
     # PID and avoids matching unrelated commands whose arguments contain the
@@ -247,9 +256,9 @@ stop_existing_portix() {
         case "$pid" in
             ''|*[!0-9]*) continue ;;
         esac
-        [ "$pid" != "$self_pid" ] || continue
+        [ "$pid" != "$$" ] || continue
         [ "$pid" != "$keep_pid" ] || continue
-        is_protected_pid "$pid" && continue
+        [ -z "${PROTECTED_PIDS[$pid]:-}" ] || continue
         if is_portix_process "$pid"; then
             pids+=("$pid")
         fi
@@ -290,21 +299,22 @@ stop_existing_portix() {
 root_portix_present() {
     [ "${EUID:-$(id -u)}" -ne 0 ] || return 1
 
-    local self_pid="$$"
     local keep_pid="${UPDATE_KEEP_PID:-0}"
     local pid uid
+    compute_protected_pids "$keep_pid"
     for pid_dir in /proc/[0-9]*; do
         pid="${pid_dir##*/}"
         case "$pid" in
             ''|*[!0-9]*) continue ;;
         esac
         [ "$pid" != "$keep_pid" ] || continue
-        is_protected_pid "$pid" && continue
+        [ -z "${PROTECTED_PIDS[$pid]:-}" ] || continue
+        # Test argv first: the owner lookup is only meaningful for a process
+        # that already looks like Portix, and `stat` is a fork per pid.
+        is_portix_process "$pid" || continue
         uid="$(stat -c '%u' "$pid_dir" 2>/dev/null || true)"
         [ "$uid" = 0 ] || continue
-        if is_portix_process "$pid"; then
-            return 0
-        fi
+        return 0
     done
     return 1
 }
