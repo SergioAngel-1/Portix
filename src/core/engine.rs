@@ -422,6 +422,10 @@ impl Engine {
             // Cheap validation of every cached owner: PID identity plus the
             // socket tuple. No fd table is touched here.
             let mut invalid = Vec::new();
+            // A process with several listeners (a dual-stack pair, tcp+udp,
+            // workers) would otherwise re-read `/proc/<pid>/stat` once per
+            // socket every scan. Memoize per pid inside this loop.
+            let mut starttimes: HashMap<i32, Option<u64>> = HashMap::new();
             for (inode, owner) in &self.inode_owners {
                 let Some(&(port, protocol, uid)) = socket_meta.get(inode) else {
                     invalid.push(*inode);
@@ -430,7 +434,10 @@ impl Engine {
                 let socket_ok =
                     owner.port == port && owner.protocol == protocol && owner.uid == uid;
                 let pid_ok = owner.starttime_jiffies.is_some_and(|starttime| {
-                    self.platform.process_starttime(owner.pid) == Some(starttime)
+                    *starttimes
+                        .entry(owner.pid)
+                        .or_insert_with(|| self.platform.process_starttime(owner.pid))
+                        == Some(starttime)
                 });
                 if !socket_ok || !pid_ok {
                     invalid.push(*inode);
@@ -999,6 +1006,7 @@ mod tests {
     struct CountingProbe {
         inner: LinuxProbe,
         walks: Arc<AtomicUsize>,
+        starttime_reads: Arc<AtomicUsize>,
     }
 
     impl CountingProbe {
@@ -1006,6 +1014,7 @@ mod tests {
             Self {
                 inner: LinuxProbe::new(Some(root)),
                 walks: Arc::new(AtomicUsize::new(0)),
+                starttime_reads: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -1020,6 +1029,7 @@ mod tests {
         }
 
         fn process_starttime(&self, pid: i32) -> Option<u64> {
+            self.starttime_reads.fetch_add(1, Ordering::Relaxed);
             self.inner.process_starttime(pid)
         }
 
@@ -1109,7 +1119,16 @@ mod tests {
         )
         .unwrap();
         std::fs::write(pid_dir.join("cmdline"), b"node\x00server.js\x00").unwrap();
-        std::os::unix::fs::symlink(format!("socket:[{inode}]"), pid_dir.join("fd/3")).unwrap();
+        // One process can own several sockets; give each its own fd.
+        let fd_dir = pid_dir.join("fd");
+        let mut fd = 3;
+        // `exists()` follows the link, and `socket:[N]` is dangling; probe the
+        // link itself.
+        while std::fs::symlink_metadata(fd_dir.join(fd.to_string())).is_ok() {
+            fd += 1;
+        }
+        std::os::unix::fs::symlink(format!("socket:[{inode}]"), fd_dir.join(fd.to_string()))
+            .unwrap();
     }
 
     /// The whole point of P0: a stable socket set must not trigger a second
@@ -1138,6 +1157,29 @@ mod tests {
             walks.load(Ordering::Relaxed),
             2,
             "scan_fresh must revalidate against live /proc"
+        );
+    }
+
+    /// A process with several listeners (dual-stack pair, tcp+udp, workers)
+    /// must validate its identity once per scan, not once per socket: the
+    /// per-socket re-read of `/proc/<pid>/stat` was pure waste.
+    #[test]
+    fn test_starttime_read_once_per_pid_per_scan() {
+        let dir = synthetic_proc(&[(8080, 1234, 777001), (8081, 1234, 777002)], &[]);
+        let probe = CountingProbe::new(dir.path());
+        let starttime_reads = Arc::clone(&probe.starttime_reads);
+        let mut engine = Engine::from_platform(Box::new(probe), Config::default());
+
+        let first = engine.scan();
+        assert_eq!(first.services.len(), 2, "one process owns two sockets");
+        starttime_reads.store(0, Ordering::Relaxed);
+
+        let second = engine.scan();
+        assert_eq!(second.services.len(), 2);
+        assert_eq!(
+            starttime_reads.load(Ordering::Relaxed),
+            1,
+            "two sockets of one pid must cost one starttime read per scan"
         );
     }
 
