@@ -12,19 +12,21 @@ use crate::model::FrameworkConfidence;
 /// - Bounded: score is always in [0, 1)
 /// - Independent: signals combine without saturating
 pub fn score_signals(signals: &[Signal]) -> HashMap<String, f64> {
-    let mut scores: HashMap<String, f64> = HashMap::new();
+    // Accumulate the complement of the evidence in one map: a second map and
+    // a second id clone per signal bought nothing.
     let mut complements: HashMap<String, f64> = HashMap::new();
 
     for signal in signals {
-        let entry = scores.entry(signal.framework_id.clone()).or_insert(1.0);
         let comp = complements
             .entry(signal.framework_id.clone())
             .or_insert(1.0);
         *comp *= 1.0 - signal.weight;
-        *entry = 1.0 - *comp;
     }
 
-    scores
+    complements
+        .into_iter()
+        .map(|(id, comp)| (id, 1.0 - comp))
+        .collect()
 }
 
 /// Convert a score to a confidence level.
