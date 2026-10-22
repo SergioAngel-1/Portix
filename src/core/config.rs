@@ -1,6 +1,19 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// CPU display scale: "system" (0-100%) or "core" (0-100%×ncpu).
+///
+/// `#[serde(other)]` on `System` keeps parsing lenient: an unknown value
+/// (`cpu_scale = "weird"`) falls back to the system scale — today's behavior —
+/// instead of rejecting the whole config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CpuScale {
+    Core,
+    #[serde(other)]
+    System,
+}
+
 /// Configuration for Portix.
 ///
 /// Unknown keys in `config.toml` are ignored by serde, so keys reserved for
@@ -28,9 +41,9 @@ pub struct Config {
     #[serde(default)]
     pub show_loopback_only: bool,
 
-    /// CPU display scale: "system" (0-100%) or "core" (0-100%×ncpu)
+    /// CPU display scale
     #[serde(default = "default_cpu_scale")]
-    pub cpu_scale: String,
+    pub cpu_scale: CpuScale,
 
     /// Require confirmation for kill
     #[serde(default = "default_true")]
@@ -46,8 +59,8 @@ fn default_theme() -> String {
 fn default_true() -> bool {
     true
 }
-fn default_cpu_scale() -> String {
-    "system".to_string()
+fn default_cpu_scale() -> CpuScale {
+    CpuScale::System
 }
 
 impl Default for Config {
@@ -95,38 +108,48 @@ pub fn display_home() -> Option<PathBuf> {
 /// in `/root/.config`. When `$SUDO_USER` is set, resolve that user's home via
 /// passwd instead. Falls back to the XDG resolution (which itself falls back
 /// to `~/.config/portix`) when there is no `$SUDO_USER` to honor.
-fn config_dir() -> PathBuf {
+///
+/// `None` when no home directory resolves at all. The old fallback was
+/// `PathBuf::from("~/.config/portix")` — a *relative* path with a literal
+/// `~`, so a theme save without a resolvable home created
+/// `./~/.config/portix/config.toml` in the current directory.
+fn config_dir() -> Option<PathBuf> {
     if let Some(home) = sudo_user_home() {
-        return home.join(".config/portix");
+        return Some(home.join(".config/portix"));
     }
-    directories::ProjectDirs::from("", "", "portix")
-        .map(|d| d.config_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("~/.config/portix"))
+    directories::ProjectDirs::from("", "", "portix").map(|d| d.config_dir().to_path_buf())
 }
 
 impl Config {
     /// Load configuration from the default location.
+    ///
+    /// `read_to_string` is the existence check: a `NotFound` means "no
+    /// config", and any other error is reported. The previous `exists()` +
+    /// read was both racy and one extra syscall.
     pub fn load() -> Self {
-        let config_dir = config_dir();
+        let Some(config_file) = config_dir().map(|dir| dir.join("config.toml")) else {
+            return Self::default();
+        };
 
-        let config_file = config_dir.join("config.toml");
+        let content = match std::fs::read_to_string(&config_file) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                eprintln!("portix: config.toml exists but could not be read ({e}); using defaults");
+                return Self::default();
+            }
+        };
 
-        if config_file.exists() {
-            match std::fs::read_to_string(&config_file) {
-                Ok(content) => match toml::from_str(&content) {
-                    Ok(config) => return config,
-                    Err(_) => eprintln!(
-                        "portix: config.toml exists but is invalid TOML; using defaults. Fix or remove {}",
-                        config_file.display()
-                    ),
-                },
-                Err(e) => eprintln!(
-                    "portix: config.toml exists but could not be read ({e}); using defaults",
-                ),
+        match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!(
+                    "portix: config.toml exists but is invalid TOML ({e}); using defaults. Fix or remove {}",
+                    config_file.display()
+                );
+                Self::default()
             }
         }
-
-        Self::default()
     }
 
     /// Get the minimum refresh interval.
@@ -134,9 +157,9 @@ impl Config {
         self.refresh_ms.max(200)
     }
 
-    /// Path to the config file, honoring XDG.
-    fn config_path() -> PathBuf {
-        config_dir().join("config.toml")
+    /// Path to the config file, honoring XDG. `None` when there is no home.
+    fn config_path() -> Option<PathBuf> {
+        config_dir().map(|dir| dir.join("config.toml"))
     }
 
     /// Persist the current theme back to `config.toml`, surgically: only the
@@ -146,9 +169,25 @@ impl Config {
     /// An unreadable-but-existing file is an error and propagates to the
     /// caller: silently overwriting it with a one-line file would destroy the
     /// user's other settings. A *missing* file is not an error — it is the
-    /// first save.
+    /// first save. With no resolvable home there is nowhere sensible to write,
+    /// so this fails instead of creating a `~` directory in the cwd.
     pub fn save_theme(&self) -> std::io::Result<()> {
-        self.save_theme_to(Self::config_path())
+        Self::save_theme_in(Self::config_path(), &self.theme)
+    }
+
+    /// [`save_theme`] against an already-resolved config directory.
+    ///
+    /// Split out so tests can exercise the no-home error without mutating the
+    /// process environment.
+    fn save_theme_in(config_dir: Option<PathBuf>, theme: &str) -> std::io::Result<()> {
+        let Some(dir) = config_dir else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no home directory to save config.toml",
+            ));
+        };
+        let path = dir.join("config.toml");
+        Self::save_theme_to(path, theme)
     }
 
     /// Same as [`save_theme`], but writes to an explicit path. Split out so
@@ -158,7 +197,7 @@ impl Config {
     /// renamed over the target. A crash mid-write can no longer leave a
     /// truncated `config.toml` that silently resets every setting on the next
     /// load.
-    fn save_theme_to(&self, path: PathBuf) -> std::io::Result<()> {
+    fn save_theme_to(path: PathBuf, theme: &str) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -167,7 +206,7 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e),
         };
-        let content = upsert_theme_line(&existing, &self.theme);
+        let content = upsert_theme_line(&existing, theme);
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, content)?;
         match std::fs::rename(&tmp, &path) {
@@ -304,7 +343,7 @@ mod tests {
             ..Config::default()
         };
 
-        config.save_theme_to(path.clone()).unwrap();
+        Config::save_theme_to(path.clone(), &config.theme).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "theme = \"mono\"\n");
@@ -326,6 +365,39 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
 
         let config = Config::default();
-        assert!(config.save_theme_to(path).is_err());
+        assert!(Config::save_theme_to(path, &config.theme).is_err());
+    }
+
+    #[test]
+    fn test_cpu_scale_parses_known_values() {
+        let config: Config = toml::from_str("cpu_scale = \"core\"").unwrap();
+        assert_eq!(config.cpu_scale, CpuScale::Core);
+
+        let config: Config = toml::from_str("cpu_scale = \"system\"").unwrap();
+        assert_eq!(config.cpu_scale, CpuScale::System);
+    }
+
+    /// An unknown scale is not a typo worth losing the whole config over: it
+    /// keeps the old lenient behavior and falls back to the system scale.
+    #[test]
+    fn test_cpu_scale_unknown_value_falls_back_to_system() {
+        let config: Config = toml::from_str("cpu_scale = \"weird\"\nrefresh_ms = 500").unwrap();
+        assert_eq!(config.cpu_scale, CpuScale::System);
+        assert_eq!(config.refresh_ms, 500, "the rest of the config still loads");
+    }
+
+    #[test]
+    fn test_cpu_scale_defaults_to_system() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.cpu_scale, CpuScale::System);
+    }
+
+    /// Without a resolvable home there is nowhere to save: erroring beats the
+    /// old fallback, which wrote to the *relative* path `./~/.config/portix`.
+    #[test]
+    fn test_save_theme_without_home_returns_not_found() {
+        let error = Config::save_theme_in(None, "mono").expect_err("no home is an error");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("no home directory"));
     }
 }

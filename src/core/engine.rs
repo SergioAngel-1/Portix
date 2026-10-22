@@ -4,7 +4,7 @@ use crate::core::docker_proxy::{
     read_docker_desktop, rewrite_docker_desktop, rewrite_docker_proxy, DockerDesktopData,
     DockerProxyInfo,
 };
-use crate::core::Config;
+use crate::core::{Config, CpuScale};
 use crate::detect::project::{detect_project, manifest_mtime};
 use crate::detect::DetectorRegistry;
 use crate::model::{
@@ -633,7 +633,7 @@ impl Engine {
     }
 
     fn cpu_scale_factor(&self) -> usize {
-        if self.config.cpu_scale == "core" {
+        if self.config.cpu_scale == CpuScale::Core {
             self.num_cpus
         } else {
             1
