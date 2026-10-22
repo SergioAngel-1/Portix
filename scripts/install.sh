@@ -33,7 +33,10 @@ ROOT_CLEANED="${PORTIX_ROOT_CLEANED:-0}"
 STOP_ONLY="${PORTIX_STOP_ONLY:-0}"
 
 usage() {
-    sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # Print the leading comment header only. A fixed line range went stale the
+    # moment the header grew and leaked `set -euo pipefail` plus code into
+    # --help, so stop at the first non-comment line instead.
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
 
 while [ $# -gt 0 ]; do
@@ -204,11 +207,11 @@ is_portix_process() {
 
 parent_pid() {
     local pid="$1"
-    local stat suffix state ppid _rest
+    local stat suffix _ ppid _rest
     stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
     [ -n "$stat" ] || return 1
     suffix="${stat##*) }"
-    read -r state ppid _rest <<< "$suffix"
+    read -r _ ppid _rest <<< "$suffix"
     case "$ppid" in
         ''|*[!0-9]*) return 1 ;;
         *) printf '%s\n' "$ppid" ;;
@@ -504,14 +507,14 @@ if [ "$NO_RECURSE" -eq 0 ] && { [ "$ALL_CONTEXTS" -eq 1 ] || { [ "${EUID:-$(id -
         if [ -n "$INVOKING_HOME" ]; then
             echo "==> updating invoking user context: $SUDO_USER"
             runuser -u "$SUDO_USER" -- env HOME="$INVOKING_HOME" \
-                PORTIX_NO_RECURSE=1 ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
+                PORTIX_NO_RECURSE=1 PORTIX_ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
                 BIN_DIR="$INVOKING_HOME/.local/bin" \
                 "$PROJECT_ROOT/scripts/install.sh" --profile "$PROFILE"
         fi
     else
         echo "==> updating privileged context via sudo"
         sudo --preserve-env=SUDO_USER env \
-            PORTIX_NO_RECURSE=1 ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
+            PORTIX_NO_RECURSE=1 PORTIX_ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
             "$PROJECT_ROOT/scripts/install.sh" --sudo --profile "$PROFILE"
     fi
 fi

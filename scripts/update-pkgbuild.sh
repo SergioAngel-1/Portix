@@ -16,12 +16,18 @@
 # Install the package locally:  cd packaging/aur && makepkg -si
 set -euo pipefail
 
+usage() {
+    # Print the leading comment header only: a fixed line range leaked
+    # `set -euo pipefail` and code into --help as soon as the header changed.
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
+}
+
 MODE="write"
 for arg in "$@"; do
     case "$arg" in
         --check) MODE="check" ;;
         --print) MODE="print" ;;
-        -h | --help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) usage; exit 0 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
