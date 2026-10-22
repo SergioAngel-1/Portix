@@ -19,28 +19,39 @@
 ///
 /// See §13.2 in PRD for security details.
 pub fn sanitize_for_terminal(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() {
-                // Allow tab (expand to spaces) and newline
-                if c == '\t' {
-                    "  ".to_string()
-                } else if c == '\n' {
-                    "\n".to_string()
-                } else {
-                    // Replace other control characters
-                    "·".to_string()
-                }
-            } else if is_unsafe_format(c) {
-                // Format characters (bidi overrides, zero-width joiners,
-                // directional isolates) render invisibly or reorder text;
-                // same treatment as control characters.
-                "·".to_string()
+    sanitize(text, false)
+}
+
+/// Shared sanitizer for [`sanitize_for_terminal`] and [`cell`].
+///
+/// This runs for every cell of every row on every frame, so it builds the
+/// result in one pre-sized `String` instead of allocating one temporary
+/// `String` per character. `flatten_newlines` is the only difference between
+/// the two public entry points: `cell` maps `\n` to a space, while the
+/// primitive preserves it.
+fn sanitize(text: &str, flatten_newlines: bool) -> String {
+    let mut clean = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            // Allow tab (expand to spaces) and newline
+            if c == '\t' {
+                clean.push_str("  ");
+            } else if c == '\n' {
+                clean.push(if flatten_newlines { ' ' } else { '\n' });
             } else {
-                c.to_string()
+                // Replace other control characters
+                clean.push('·');
             }
-        })
-        .collect()
+        } else if is_unsafe_format(c) {
+            // Format characters (bidi overrides, zero-width joiners,
+            // directional isolates) render invisibly or reorder text;
+            // same treatment as control characters.
+            clean.push('·');
+        } else {
+            clean.push(c);
+        }
+    }
+    clean
 }
 
 /// Is `c` a Unicode format character (category Cf)?
@@ -77,7 +88,7 @@ fn is_unsafe_format(c: char) -> bool {
 /// that calls `sanitize_for_terminal` directly would let `\n` split a table
 /// cell into injected rows.
 pub fn cell(text: &str) -> String {
-    sanitize_for_terminal(text).replace('\n', " ")
+    sanitize(text, true)
 }
 
 /// Compact byte formatting for table cells: "312M", not "312.4 M".
@@ -203,6 +214,18 @@ mod tests {
     fn test_sanitize_keeps_normal_text_and_tab() {
         let clean = sanitize_for_terminal("hola\tmundo ñ");
         assert_eq!(clean, "hola  mundo ñ");
+    }
+
+    /// The single-pass rewrite must stay byte-identical to the previous
+    /// implementation for every class of hostile input: ESC/BEL,
+    /// bidi override, zero-width space, tab, newline, carriage return and
+    /// multibyte text.
+    #[test]
+    fn test_sanitize_and_cell_match_expected_hostile_output() {
+        let hostile = "\x1b]0;pwned\x07\u{202E}\u{200B}\t\n\rñ";
+
+        assert_eq!(sanitize_for_terminal(hostile), "·]0;pwned···  \n·ñ");
+        assert_eq!(cell(hostile), "·]0;pwned···   ·ñ");
     }
 
     #[test]
