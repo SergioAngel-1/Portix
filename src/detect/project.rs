@@ -1,5 +1,7 @@
 use crate::model::{PackageManager, Project};
-use std::path::Path;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 /// Manifest files that mark a project root, in priority order.
 const PACKAGE_MARKERS: &[&str] = &[
@@ -23,12 +25,55 @@ const PACKAGE_MARKERS: &[&str] = &[
     "pubspec.yaml",
 ];
 
+/// The names of the entries in `dir`, from a single `read_dir`.
+///
+/// Detection used to probe each candidate marker with `Path::exists`, i.e. one
+/// `stat` per marker per directory: 18 for the package markers, 5 more for the
+/// workspace markers, and ~25 for the lockfile/language checks. One `read_dir`
+/// answers all of them for a directory. `None` when the directory cannot be
+/// listed (EACCES on a traversable but unreadable dir); callers then fall back
+/// to `exists()` for that directory, so detection never regresses.
+///
+/// Also `None` past [`MAX_LISTED_ENTRIES`]: a process whose cwd is `/tmp` or a
+/// download folder would otherwise pay a listing of thousands of entries where
+/// the ~50 `stat`s it replaces are the cheaper option.
+fn entry_names(dir: &Path) -> Option<HashSet<OsString>> {
+    let mut names = HashSet::new();
+    let entries = std::fs::read_dir(dir).ok()?;
+    // One entry can vanish or be unreadable mid-iteration; that must not
+    // throw away the names already collected from the rest of the dir.
+    for entry in entries.flatten() {
+        if names.len() >= MAX_LISTED_ENTRIES {
+            return None;
+        }
+        names.insert(entry.file_name());
+    }
+    Some(names)
+}
+
+/// Directory size beyond which listing it costs more than probing each marker.
+const MAX_LISTED_ENTRIES: usize = 512;
+
+/// Is `name` present in `dir`? Uses the pre-read entry set when the directory
+/// was listable and falls back to a `stat` when it was not.
+fn has_entry(dir: &Path, names: Option<&HashSet<OsString>>, name: &str) -> bool {
+    match names {
+        Some(names) => names.contains(OsStr::new(name)),
+        None => dir.join(name).exists(),
+    }
+}
+
 /// Which package manager owns a project root.
 ///
 /// For the JavaScript ecosystem the manifest name says nothing — every one of
 /// them ships a `package.json`. The lockfile is what actually distinguishes
-/// them, so it is consulted first.
-fn detect_package_manager(root: &Path, marker: &str) -> Option<PackageManager> {
+/// them, so it is consulted first. `names` is the already-read entry set for
+/// `root`, when it was listable.
+fn detect_package_manager(
+    root: &Path,
+    marker: &str,
+    names: Option<&HashSet<OsString>>,
+) -> Option<PackageManager> {
     const LOCKFILES: &[(&str, PackageManager)] = &[
         ("pnpm-lock.yaml", PackageManager::Pnpm),
         ("yarn.lock", PackageManager::Yarn),
@@ -40,7 +85,7 @@ fn detect_package_manager(root: &Path, marker: &str) -> Option<PackageManager> {
     ];
 
     for (lockfile, pm) in LOCKFILES {
-        if root.join(lockfile).exists() {
+        if has_entry(root, names, lockfile) {
             return Some(*pm);
         }
     }
@@ -80,16 +125,22 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
     let home = directories::UserDirs::new().map(|u| u.home_dir().to_path_buf());
 
     // Phase 1: Find the package marker (project root)
-    let mut project_root = None;
+    let mut project_root: Option<(PathBuf, PathBuf)> = None;
+    let mut root_names = None;
     let mut package_manager = None;
     let mut depth = 0;
 
     loop {
-        // Check for package markers
+        // One `read_dir` for every marker in this directory (see `entry_names`).
+        let names = entry_names(&current);
+
+        // Check for package markers, in priority order: `PACKAGE_MARKERS`
+        // still decides which marker wins when several exist.
         for marker in PACKAGE_MARKERS {
-            if current.join(marker).exists() {
-                package_manager = detect_package_manager(&current, marker);
-                project_root = Some(current.clone());
+            if has_entry(&current, names.as_ref(), marker) {
+                package_manager = detect_package_manager(&current, marker, names.as_ref());
+                root_names = names;
+                project_root = Some((current.clone(), current.join(marker)));
                 break;
             }
         }
@@ -119,7 +170,7 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
         }
     }
 
-    let root = project_root?;
+    let (root, manifest) = project_root?;
 
     // Phase 2: Find workspace root
     let mut workspace_root = None;
@@ -131,22 +182,23 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
     };
 
     loop {
+        let names = entry_names(&current);
+
         // Check for workspace markers
         for marker in WORKSPACE_MARKERS {
-            if current.join(marker).exists() {
+            if has_entry(&current, names.as_ref(), marker) {
                 workspace_root = Some(current.clone());
                 break;
             }
         }
 
         // Check for Cargo.toml with [workspace]
-        if current.join("Cargo.toml").exists() {
+        if workspace_root.is_none() && has_entry(&current, names.as_ref(), "Cargo.toml") {
             if let Some(content) =
                 crate::detect::project::read_manifest(&current.join("Cargo.toml"))
             {
                 if content.contains("[workspace]") {
                     workspace_root = Some(current.clone());
-                    break;
                 }
             }
         }
@@ -181,10 +233,11 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
     let package_name = read_package_name(&root);
     let name = derive_project_name(&root, workspace_root.as_deref(), package_name.as_deref());
     let technical_name = package_name;
-    let language = detect_language(&root);
+    let language = detect_language(&root, root_names.as_ref());
 
     Some(Project {
         root,
+        manifest,
         workspace_root,
         name,
         technical_name,
@@ -231,13 +284,11 @@ fn derive_project_name(
 ///
 /// When `pnpm add next@16` rewrites package.json, its mtime changes, the L3
 /// framework key changes, and the displayed version refreshes on the next scan.
-/// No polling, no inotify.
-pub fn manifest_mtime(root: &Path) -> Option<u64> {
-    PACKAGE_MARKERS
-        .iter()
-        .map(|marker| root.join(marker))
-        .find(|p| p.exists())
-        .and_then(|p| crate::cache::keys::mtime(&p))
+/// No polling, no inotify. The path is the matched manifest recorded on the
+/// [`Project`], so the hot path is exactly one `stat` — probing the marker list
+/// again would be up to 18 for every (pid, port) on every scan.
+pub fn manifest_mtime(manifest: &Path) -> Option<u64> {
+    crate::cache::keys::mtime(manifest)
 }
 
 /// Read a manifest file with a hard cap and a regular-file requirement
@@ -309,44 +360,47 @@ fn read_package_name(root: &Path) -> Option<String> {
 }
 
 /// Detect the programming language from the manifest files present at root.
-fn detect_language(root: &Path) -> Option<String> {
+///
+/// `names` is the entry set already read while locating the root, so this does
+/// not re-`stat` every marker.
+fn detect_language(root: &Path, names: Option<&HashSet<OsString>>) -> Option<String> {
     // Check in priority order, consulting the same PACKAGE_MARKERS files.
-    if root.join("Cargo.toml").exists() {
+    if has_entry(root, names, "Cargo.toml") {
         return Some("Rust".to_string());
     }
-    if root.join("go.mod").exists() {
+    if has_entry(root, names, "go.mod") {
         return Some("Go".to_string());
     }
-    if root.join("package.json").exists()
-        || root.join("deno.json").exists()
-        || root.join("deno.jsonc").exists()
-        || root.join("bunfig.toml").exists()
+    if has_entry(root, names, "package.json")
+        || has_entry(root, names, "deno.json")
+        || has_entry(root, names, "deno.jsonc")
+        || has_entry(root, names, "bunfig.toml")
     {
         return Some("JavaScript".to_string());
     }
-    if root.join("pyproject.toml").exists()
-        || root.join("setup.py").exists()
-        || root.join("setup.cfg").exists()
-        || root.join("requirements.txt").exists()
-        || root.join("Pipfile").exists()
+    if has_entry(root, names, "pyproject.toml")
+        || has_entry(root, names, "setup.py")
+        || has_entry(root, names, "setup.cfg")
+        || has_entry(root, names, "requirements.txt")
+        || has_entry(root, names, "Pipfile")
     {
         return Some("Python".to_string());
     }
-    if root.join("Gemfile").exists() {
+    if has_entry(root, names, "Gemfile") {
         return Some("Ruby".to_string());
     }
-    if root.join("composer.json").exists() {
+    if has_entry(root, names, "composer.json") {
         return Some("PHP".to_string());
     }
-    if root.join("mix.exs").exists() {
+    if has_entry(root, names, "mix.exs") {
         return Some("Elixir".to_string());
     }
-    if root.join("pubspec.yaml").exists() {
+    if has_entry(root, names, "pubspec.yaml") {
         return Some("Dart".to_string());
     }
-    if root.join("pom.xml").exists()
-        || root.join("build.gradle").exists()
-        || root.join("build.gradle.kts").exists()
+    if has_entry(root, names, "pom.xml")
+        || has_entry(root, names, "build.gradle")
+        || has_entry(root, names, "build.gradle.kts")
     {
         return Some("Java".to_string());
     }
@@ -369,7 +423,7 @@ mod tests {
     fn test_lockfile_beats_manifest_for_package_manager() {
         let dir = project(&[("package.json", "{}"), ("pnpm-lock.yaml", "")]);
         assert_eq!(
-            detect_package_manager(dir.path(), "package.json"),
+            detect_package_manager(dir.path(), "package.json", entry_names(dir.path()).as_ref()),
             Some(PackageManager::Pnpm)
         );
     }
@@ -378,7 +432,7 @@ mod tests {
     fn test_package_json_without_lockfile_defaults_to_npm() {
         let dir = project(&[("package.json", "{}")]);
         assert_eq!(
-            detect_package_manager(dir.path(), "package.json"),
+            detect_package_manager(dir.path(), "package.json", entry_names(dir.path()).as_ref()),
             Some(PackageManager::Npm)
         );
     }
@@ -497,5 +551,70 @@ mod tests {
         let d = dir.path().join("package.json");
         std::fs::create_dir(&d).unwrap();
         assert!(read_manifest(&d).is_none());
+    }
+
+    /// A huge directory is not listed (the per-marker `stat`s are cheaper),
+    /// and detection still finds the manifest through the fallback.
+    #[test]
+    fn test_huge_directory_falls_back_to_marker_probing() {
+        let dir = project(&[("package.json", r#"{"name":"big"}"#)]);
+        for i in 0..MAX_LISTED_ENTRIES {
+            std::fs::write(dir.path().join(format!("f{i}")), "").unwrap();
+        }
+        assert!(entry_names(dir.path()).is_none());
+        assert_eq!(detect_project(dir.path()).unwrap().name, "big");
+    }
+
+    /// `PACKAGE_MARKERS` order still decides which marker wins when several
+    /// coexist: `package.json` is first, so it marks the root (and its
+    /// ecosystem's package manager) even though `Cargo.toml` is present.
+    #[test]
+    fn test_package_marker_priority_is_preserved() {
+        let dir = project(&[
+            ("package.json", r#"{"name":"web"}"#),
+            ("Cargo.toml", "[package]\nname = \"web\"\n"),
+        ]);
+
+        let detected = detect_project(dir.path()).unwrap();
+        assert_eq!(detected.package_manager, Some(PackageManager::Npm));
+        assert_eq!(detected.manifest, dir.path().join("package.json"));
+    }
+
+    /// The matched manifest is recorded on the project so the framework cache
+    /// key can `stat` it directly instead of probing every marker again.
+    #[test]
+    fn test_manifest_records_the_matched_marker() {
+        let dir = project(&[("Cargo.toml", "[package]\nname = \"portix\"\n")]);
+
+        let detected = detect_project(dir.path()).unwrap();
+        assert_eq!(detected.manifest, dir.path().join("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_workspace_root_is_still_found_above_the_project() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("pnpm-workspace.yaml"), "").unwrap();
+        let member = workspace.path().join("apps/web");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), "{}").unwrap();
+
+        let detected = detect_project(&member).unwrap();
+        assert_eq!(detected.root, member);
+        assert_eq!(detected.workspace_root.as_deref(), Some(workspace.path()));
+    }
+
+    /// The recorded manifest is what the L3 key follows: rewriting it must
+    /// move the mtime even within the same second.
+    #[test]
+    fn test_manifest_mtime_tracks_the_recorded_manifest() {
+        let dir = project(&[("package.json", r#"{"name":"a"}"#)]);
+        let detected = detect_project(dir.path()).unwrap();
+
+        let first = manifest_mtime(&detected.manifest).expect("first mtime");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::fs::write(&detected.manifest, r#"{"name":"b"}"#).unwrap();
+        let second = manifest_mtime(&detected.manifest).expect("second mtime");
+
+        assert_ne!(first, second, "a manifest rewrite must change the key");
     }
 }

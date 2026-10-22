@@ -347,6 +347,7 @@ mod tests {
             }),
             project: Some(crate::model::Project {
                 root: PathBuf::from("/tmp/project"),
+                manifest: PathBuf::from("/tmp/project/package.json"),
                 workspace_root: None,
                 name: "wrong-project".into(),
                 technical_name: None,

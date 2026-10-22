@@ -45,6 +45,10 @@ pub struct Project {
     /// Root directory of the project (the closest directory with a manifest)
     #[serde(skip)]
     pub root: PathBuf,
+    /// The manifest that marked the root (e.g. `package.json`), already
+    /// resolved so cache keys can stat it directly.
+    #[serde(skip)]
+    pub manifest: PathBuf,
     /// Root of the workspace (if in a monorepo)
     #[serde(skip)]
     pub workspace_root: Option<PathBuf>,

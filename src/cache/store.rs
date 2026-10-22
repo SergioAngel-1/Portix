@@ -171,6 +171,7 @@ mod tests {
             2000,
             Some(Project {
                 root: std::path::PathBuf::from("/w"),
+                manifest: std::path::PathBuf::from("/w/package.json"),
                 workspace_root: None,
                 name: "web".into(),
                 technical_name: None,

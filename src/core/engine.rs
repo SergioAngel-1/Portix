@@ -665,30 +665,33 @@ impl Engine {
             None => detect_project(cwd),
         };
 
-        let root = project.as_ref().map(|p| p.root.clone());
-        let framework = self.detect_framework_cached(root.as_deref(), process, port);
+        let framework = self.detect_framework_cached(project.as_ref(), process, port);
 
         (project, framework)
     }
 
     fn detect_framework_cached(
         &mut self,
-        root: Option<&Path>,
+        project: Option<&crate::model::Project>,
         process: &Process,
         port: u16,
     ) -> Option<crate::model::Framework> {
+        let root = project.map(|p| p.root.as_path());
         let detect = |registry: &DetectorRegistry| {
             registry.detect(root, process.exe.as_deref(), &process.cmdline, port)
         };
 
         // Only project-rooted detection is cacheable: it is the half that reads
-        // manifests. The key carries the manifest mtime, so `pnpm add` invalidates.
-        let Some(root) = root else {
+        // manifests. The key carries the mtime of the manifest detection
+        // already matched, so the hot path is one `stat` and `pnpm add`
+        // invalidates.
+        let Some(project) = project else {
             return detect(&self.registry);
         };
-        let (Some(root_inode), Some(mtime)) =
-            (crate::cache::keys::inode(root), manifest_mtime(root))
-        else {
+        let (Some(root_inode), Some(mtime)) = (
+            crate::cache::keys::inode(&project.root),
+            manifest_mtime(&project.manifest),
+        ) else {
             return detect(&self.registry);
         };
 
