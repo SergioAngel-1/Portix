@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
+    cursor,
     event::{
         self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind, KeyModifiers,
     },
@@ -451,6 +452,29 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// Install a panic hook that gives the terminal back before the panic message
+/// is printed.
+///
+/// A panic unwinds through [`RawModeGuard`], which turns raw mode off, but
+/// nothing leaves the alternate screen, disables focus reporting or shows the
+/// cursor again. The panic message then scrolls by on a screen the shell is
+/// about to restore, and the cursor stays hidden. Restoring here — best-effort,
+/// a broken terminal must never hide the original panic — and then chaining to
+/// the previous hook keeps both the diagnosis and the user's shell usable.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            DisableFocusChange,
+            LeaveAlternateScreen,
+            cursor::Show
+        );
+        previous(info);
+    }));
+}
+
 /// Rebuild and reinstall portix from the local source tree.
 ///
 /// Finds `scripts/install.sh` relative to the source directory that was used
@@ -525,6 +549,13 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
     for sig in [SIGTERM, SIGHUP, SIGINT] {
         flag::register(sig, Arc::clone(&interrupted))?;
     }
+
+    // A panic unwinds through `RawModeGuard` (raw mode off), but the alternate
+    // screen, focus reporting and the hidden cursor would survive it: the
+    // panic message lands on a screen that is about to disappear and the shell
+    // is left broken. Restore first, then chain to the previous hook so the
+    // message still reaches the user.
+    install_panic_hook();
 
     enable_raw_mode()?;
     // From here on, every exit path must restore the terminal — leaving a
@@ -631,6 +662,26 @@ fn collector_loop(
     }
 }
 
+/// Move every snapshot waiting on the collector channel into `app`.
+///
+/// Returns whether any snapshot was applied. A disconnected channel means the
+/// collector thread is gone: whatever it sent has already been drained above,
+/// and continuing would leave the table frozen on a snapshot nobody will ever
+/// update, so the caller must surface "collector thread stopped" instead.
+fn drain_snapshots(rx: &mpsc::Receiver<SharedSnapshot>, app: &mut App) -> Result<bool> {
+    let mut got_snapshot = false;
+    loop {
+        match rx.try_recv() {
+            Ok(snapshot) => {
+                app.update_snapshot(snapshot);
+                got_snapshot = true;
+            }
+            Err(mpsc::TryRecvError::Empty) => return Ok(got_snapshot),
+            Err(mpsc::TryRecvError::Disconnected) => anyhow::bail!("collector thread stopped"),
+        }
+    }
+}
+
 // The loop owns the terminal, the shared engine, the snapshot channel and the
 // two atomic flags; splitting them into a context struct would only move the
 // same state one level down.
@@ -665,11 +716,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         // Drain whatever snapshots the collector produced since the last
         // iteration. Drawing only when something actually changed keeps CPU
         // at rest between events indistinguishable from zero.
-        let mut got_snapshot = false;
-        while let Ok(snapshot) = rx.try_recv() {
-            app.update_snapshot(snapshot);
-            got_snapshot = true;
-        }
+        let got_snapshot = drain_snapshots(&rx, &mut app)?;
         if got_snapshot || dirty {
             terminal.draw(|f| draw(f, &app))?;
             dirty = false;
@@ -1076,5 +1123,53 @@ mod tests {
             err.to_string().contains("process"),
             "port 80 must be found and the signal step must fail safely: {err}"
         );
+    }
+
+    fn test_app() -> App {
+        App::new(
+            Config::default(),
+            Theme::select("default-dark", false),
+            false,
+        )
+    }
+
+    fn snapshot_at(epoch_secs: u64) -> SharedSnapshot {
+        Arc::new(portix_lib::model::Snapshot {
+            services: Vec::new(),
+            taken_at_epoch_secs: epoch_secs,
+            scan_duration_ms: 0,
+            degradations: Vec::new(),
+        })
+    }
+
+    /// Pending snapshots are applied in order, and an empty channel is not an
+    /// error — the loop must keep polling without redrawing.
+    #[test]
+    fn test_drain_snapshots_applies_pending_then_reports_empty() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = test_app();
+
+        assert!(!drain_snapshots(&rx, &mut app).unwrap());
+        tx.send(snapshot_at(1)).unwrap();
+        tx.send(snapshot_at(2)).unwrap();
+        assert!(drain_snapshots(&rx, &mut app).unwrap());
+        assert_eq!(app.snapshot.taken_at_epoch_secs, 2);
+        assert!(!drain_snapshots(&rx, &mut app).unwrap());
+    }
+
+    /// A collector that dies stops sending but leaves the receiver alive: the
+    /// old loop would sit on a frozen table forever. It must surface an error
+    /// after draining whatever the collector managed to send.
+    #[test]
+    fn test_drain_snapshots_errors_when_collector_stops() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = test_app();
+        tx.send(snapshot_at(7)).unwrap();
+        drop(tx);
+
+        let err = drain_snapshots(&rx, &mut app).unwrap_err();
+        assert_eq!(err.to_string(), "collector thread stopped");
+        // The last snapshot was not thrown away on the way out.
+        assert_eq!(app.snapshot.taken_at_epoch_secs, 7);
     }
 }
