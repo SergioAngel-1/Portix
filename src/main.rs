@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -500,6 +502,14 @@ fn run_update(all_contexts: bool) -> Result<i32> {
     })
 }
 
+/// Refresh cadence while the terminal is unfocused.
+///
+/// The table is not being looked at, so a five-second cadence keeps it warm
+/// while letting the machine idle. Focus gain is detected by the collector
+/// within its 50 ms sleep slice, so returning to the terminal refreshes
+/// immediately instead of waiting out the idle interval.
+const UNFOCUSED_REFRESH: Duration = Duration::from_secs(5);
+
 fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<()> {
     if !io::stdout().is_terminal() {
         anyhow::bail!("stdout is not a terminal; use --once or --json");
@@ -521,7 +531,10 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
     // user in raw mode on the alternate screen is worse than the error.
     let _raw = RawModeGuard;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // Focus events let the collector slow down when the terminal is in the
+    // background. Not every terminal supports the sequence; one that does not
+    // simply never sends the events, and the app stays on the focused cadence.
+    execute!(stdout, EnterAlternateScreen, EnableFocusChange)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -533,12 +546,14 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
     // holding the lock).
     let engine = Arc::new(Mutex::new(engine));
     let refresh = Duration::from_millis(config.min_refresh_ms());
+    let focused = Arc::new(AtomicBool::new(true));
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
     let collector = {
         let engine = Arc::clone(&engine);
         let shutdown = Arc::clone(&shutdown);
-        thread::spawn(move || collector_loop(engine, tx, refresh, shutdown))
+        let focused = Arc::clone(&focused);
+        thread::spawn(move || collector_loop(engine, tx, refresh, shutdown, focused))
     };
 
     let result = event_loop(
@@ -549,12 +564,18 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
         theme,
         color,
         interrupted,
+        &focused,
     );
 
     // Restore the terminal even if the loop failed. Leaving a user in raw mode
-    // on the alternate screen is worse than whatever error got us here.
+    // on the alternate screen is worse than whatever error got us here. Stop
+    // focus reporting first so the shell does not receive focus sequences.
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableFocusChange,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     // Stop the collector (it sleeps in short slices, so this returns quickly)
@@ -567,16 +588,21 @@ fn run_tui(config: Config, engine: Engine, theme: Theme, color: bool) -> Result<
 
 /// The periodic scan loop, off the UI thread.
 ///
-/// Scans run back-to-back with a `refresh` pause between them; each snapshot
-/// is handed to the UI over the channel. The engine is locked only for the
-/// duration of each scan, so the UI thread can still lock it for the
-/// synchronous kill-path re-scans (`Effect::KillRequest` / `Effect::Kill`).
-/// The pause is slept in short slices so `shutdown` is honoured promptly.
+/// Scans run back-to-back with a pause between them; each snapshot is handed
+/// to the UI over the channel. The engine is locked only for the duration of
+/// each scan, so the UI thread can still lock it for the synchronous kill-path
+/// re-scans (`Effect::KillRequest` / `Effect::Kill`).
+///
+/// The pause adapts to terminal focus: `refresh` while focused, at least
+/// [`UNFOCUSED_REFRESH`] while backgrounded. It is re-evaluated in 50 ms
+/// slices, so both shutdown and focus gain are honoured promptly (a return to
+/// the terminal does not wait out the idle interval).
 fn collector_loop(
     engine: Arc<Mutex<Engine>>,
     tx: mpsc::Sender<SharedSnapshot>,
     refresh: Duration,
     shutdown: Arc<AtomicBool>,
+    focused: Arc<AtomicBool>,
 ) {
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -586,17 +612,29 @@ fn collector_loop(
         if tx.send(snapshot).is_err() {
             break; // The UI is gone; nothing left to feed.
         }
-        let deadline = Instant::now() + refresh;
-        while Instant::now() < deadline {
+        let last_scan = Instant::now();
+        loop {
             if shutdown.load(Ordering::Relaxed) {
                 return;
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            thread::sleep(remaining.min(Duration::from_millis(50)));
+            let interval = if focused.load(Ordering::Relaxed) {
+                refresh
+            } else {
+                refresh.max(UNFOCUSED_REFRESH)
+            };
+            let elapsed = last_scan.elapsed();
+            if elapsed >= interval {
+                break;
+            }
+            thread::sleep((interval - elapsed).min(Duration::from_millis(50)));
         }
     }
 }
 
+// The loop owns the terminal, the shared engine, the snapshot channel and the
+// two atomic flags; splitting them into a context struct would only move the
+// same state one level down.
+#[allow(clippy::too_many_arguments)]
 fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     config: Config,
@@ -605,6 +643,7 @@ fn event_loop<B: ratatui::backend::Backend>(
     theme: Theme,
     color: bool,
     interrupted: Arc<AtomicBool>,
+    focused: &Arc<AtomicBool>,
 ) -> Result<()> {
     let mut app = App::new(config.clone(), theme, color);
 
@@ -642,25 +681,44 @@ fn event_loop<B: ratatui::backend::Backend>(
         // a full `refresh` poll would let snapshots sit in the channel for up
         // to one scan duration. A 100 ms cap bounds pickup latency while
         // costing only a handful of near-zero-cost wakeups per second (no
-        // redraw happens unless something changed).
-        let timeout = refresh.min(Duration::from_millis(100));
+        // redraw happens unless something changed). A backgrounded terminal
+        // polls less often; focus events still wake it.
+        let timeout = if focused.load(Ordering::Relaxed) {
+            refresh.min(Duration::from_millis(100))
+        } else {
+            Duration::from_millis(250)
+        };
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                // Key events fire on press *and* release on some terminals.
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    return Ok(());
-                }
-
-                for effect in app.handle_key(key) {
-                    // `Quit` must leave the loop, not just this `for`.
-                    if run_effect(effect, &mut app, engine) == ControlFlow::Quit {
+            match event::read()? {
+                Event::Key(key) => {
+                    // Key events fire on press *and* release on some terminals.
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
                         return Ok(());
                     }
+
+                    for effect in app.handle_key(key) {
+                        // `Quit` must leave the loop, not just this `for`.
+                        if run_effect(effect, &mut app, engine) == ControlFlow::Quit {
+                            return Ok(());
+                        }
+                    }
+                    dirty = true;
                 }
-                dirty = true;
+                // The terminal gained focus: the collector re-evaluates its
+                // pause on the next 50 ms slice and scans immediately if the
+                // last snapshot is older than the focused interval.
+                Event::FocusGained => focused.store(true, Ordering::Relaxed),
+                Event::FocusLost => focused.store(false, Ordering::Relaxed),
+                // A resize needs a redraw even if no snapshot arrived — while
+                // backgrounded, waiting for the next scan could leave a stale
+                // frame for seconds.
+                Event::Resize(_, _) => dirty = true,
+                _ => {}
             }
         }
 
