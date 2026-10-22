@@ -54,11 +54,14 @@ fn scan_runtimes_and_proxies(proc_root: &Path) -> (Vec<&'static str>, bool) {
     };
 
     for entry in entries.flatten() {
-        let pid_str = entry.file_name().to_string_lossy().into_owned();
-        let Ok(pid) = pid_str.parse::<i32>() else {
+        // Check the name as an `OsStr` and reuse `entry.path()` for the dir:
+        // the old `to_string_lossy().into_owned()` + `proc_root.join(pid.to_string())`
+        // allocated twice per pid on a walk that visits all of /proc.
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(|s| s.parse::<i32>().is_ok()) {
             continue;
-        };
-        let pid_dir = proc_root.join(pid.to_string());
+        }
+        let pid_dir = entry.path();
 
         // Runtime attribution uses the structured cgroup parser, so the
         // daemon's own unit (`docker.service`) and host-level

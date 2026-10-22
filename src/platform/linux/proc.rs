@@ -108,6 +108,9 @@ fn read_link_safe(path: &Path) -> Result<PathBuf> {
 }
 
 /// Parse /proc/<pid>/status.
+///
+/// `State:` and `PPid:` are deliberately not parsed: `/proc/<pid>/stat`
+/// already provides both, and the copies here were never read.
 fn read_status(pid_dir: &Path) -> Option<StatusInfo> {
     let content = std::fs::read_to_string(pid_dir.join("status")).ok()?;
     let mut info = StatusInfo::default();
@@ -115,17 +118,8 @@ fn read_status(pid_dir: &Path) -> Option<StatusInfo> {
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("Name:") {
             info.name = value.trim().to_string();
-        } else if let Some(value) = line.strip_prefix("State:") {
-            // State line looks like: "State:  S (sleeping)"
-            if let Some(state_char) = value.trim().chars().next() {
-                info.state = ProcessState::from_char(state_char).unwrap_or(ProcessState::Sleeping);
-            }
         } else if let Some(_value) = line.strip_prefix("Pid:") {
             // We already know the PID
-        } else if let Some(value) = line.strip_prefix("PPid:") {
-            if let Ok(ppid) = value.trim().parse::<i32>() {
-                info.ppid = ppid;
-            }
         } else if let Some(value) = line.strip_prefix("VmRSS:") {
             // Format: "VmRSS:    12345 kB"
             if let Some(kb_str) = value.trim().strip_suffix(" kB") {
@@ -154,28 +148,13 @@ fn read_status(pid_dir: &Path) -> Option<StatusInfo> {
     Some(info)
 }
 
+#[derive(Default)]
 struct StatusInfo {
     name: String,
-    ppid: i32,
-    state: ProcessState,
     rss_bytes: Option<u64>,
     virt_bytes: Option<u64>,
     uid: Option<u32>,
     threads: u32,
-}
-
-impl Default for StatusInfo {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            ppid: 0,
-            state: ProcessState::Sleeping,
-            rss_bytes: None,
-            virt_bytes: None,
-            uid: None,
-            threads: 0,
-        }
-    }
 }
 
 /// Parse /proc/<pid>/stat.
