@@ -24,7 +24,12 @@ pub fn process_metadata(proc_root: &Path, pid: i32) -> Result<Process> {
 
     // A process can vanish between readdir and open. Its stat file is the one
     // read we cannot degrade past: without starttime there is no safe identity.
-    let stat = read_stat(proc_root, &pid_dir).context("process disappeared")?;
+    // The error is typed so the engine can tell this normal race apart from a
+    // permission/format failure without matching on a message.
+    let stat = match read_stat(proc_root, &pid_dir) {
+        Some(stat) => stat,
+        None => return Err(anyhow::Error::new(crate::platform::ProcessGone { pid })),
+    };
 
     let cmdline = read_cmdline(&pid_dir).unwrap_or_default();
     let exe = read_link_safe(&pid_dir.join("exe")).ok();
@@ -457,6 +462,18 @@ mod tests {
         let dir = fake_proc(12345, HOSTILE_COMM_STAT);
         assert_eq!(read_starttime_jiffies(dir.path(), 12345), Some(987654));
         assert_eq!(read_starttime_jiffies(dir.path(), 999), None);
+    }
+
+    /// The engine classifies a vanished owner by downcasting, so the error must
+    /// stay a typed `ProcessGone` — never just a formatted message.
+    #[test]
+    fn test_missing_process_reports_process_gone() {
+        let dir = fake_proc(12345, HOSTILE_COMM_STAT);
+        let err = process_metadata(dir.path(), 999).unwrap_err();
+        let gone = err
+            .downcast_ref::<crate::platform::ProcessGone>()
+            .expect("a vanished pid must surface as ProcessGone");
+        assert_eq!(gone.pid, 999);
     }
 
     /// `root` always exists with a home; a made-up user must not resolve.

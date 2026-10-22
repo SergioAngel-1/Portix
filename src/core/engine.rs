@@ -11,7 +11,7 @@ use crate::model::{
     Degradation, Family, Process, ProcessKey, Protocol, Service, ServiceId, SharedSnapshot, Signal,
     Snapshot, Socket,
 };
-use crate::platform::{LinuxProbe, PlatformProbe};
+use crate::platform::{LinuxProbe, PlatformProbe, ProcessGone};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -265,12 +265,10 @@ impl Engine {
                         let resolved = self.resolve_process(pid, total_jiffies, &mut live);
                         // A PID found in the reverse map may disappear before metadata is read.
                         // Preserve that distinction in the degradation report instead
-                        // of guessing permission.
+                        // of guessing permission. The check is on the typed error, so
+                        // rewording a message cannot reclassify the whole race.
                         if let Err(error) = &resolved {
-                            if error
-                                .chain()
-                                .any(|cause| cause.to_string().contains("process disappeared"))
-                            {
+                            if error.chain().any(|cause| cause.is::<ProcessGone>()) {
                                 disappeared += 1;
                             } else {
                                 partial_reads += 1;
@@ -1185,5 +1183,37 @@ mod tests {
 
         let _ = engine.scan();
         assert_eq!(walks.load(Ordering::Relaxed), 2);
+    }
+
+    /// A socket whose owner vanishes between the fd walk and the metadata read
+    /// is the normal `/proc` race. It must count as `ProcessesDisappeared`,
+    /// not as `ProcessesPartialRead` (a permission/format problem) — the
+    /// distinction the typed `ProcessGone` error exists to preserve.
+    #[test]
+    fn test_vanished_process_counts_as_disappeared() {
+        let dir = synthetic_proc(&[(8080, 1234, 777001)], &[]);
+        // The fd table still resolves the socket's owner, but its stat file is
+        // gone: exactly what a process exiting mid-scan looks like.
+        std::fs::remove_file(dir.path().join("1234/stat")).unwrap();
+        let mut engine =
+            Engine::from_platform(Box::new(CountingProbe::new(dir.path())), Config::default());
+
+        let snapshot = engine.scan();
+        assert!(
+            snapshot
+                .degradations
+                .iter()
+                .any(|d| matches!(d, Degradation::ProcessesDisappeared(1))),
+            "expected one disappeared process, got {:?}",
+            snapshot.degradations
+        );
+        assert!(
+            !snapshot
+                .degradations
+                .iter()
+                .any(|d| matches!(d, Degradation::ProcessesPartialRead(_))),
+            "a vanished owner is not a partial read: {:?}",
+            snapshot.degradations
+        );
     }
 }

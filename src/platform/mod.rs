@@ -4,6 +4,28 @@ use crate::model::{Container, Process, Signal, Socket};
 use anyhow::Result;
 use std::path::Path;
 
+/// A process whose PID was resolved by the inode walk but vanished before its
+/// `/proc/<pid>/stat` could be read.
+///
+/// This is the normal `/proc` race, not an error worth alarming about — but the
+/// engine must not confuse it with a permission or format failure. It used to
+/// classify on the anyhow context string (`"process disappeared"`), which
+/// silently misfiled every vanished process as `ProcessesPartialRead` the day
+/// someone reworded the message. A typed error makes that distinction
+/// unbreakable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessGone {
+    pub pid: i32,
+}
+
+impl std::fmt::Display for ProcessGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "process {} disappeared", self.pid)
+    }
+}
+
+impl std::error::Error for ProcessGone {}
+
 /// Platform abstraction layer.
 ///
 /// This trait defines the interface between Portix and the operating system.
