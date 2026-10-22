@@ -25,13 +25,8 @@ use std::path::Path;
 ///
 /// We do not read `/proc/<pid>/environ` or call out to any daemon.
 pub fn detect_container_warning(proc_root: &Path) -> Option<Degradation> {
-    let runtimes = active_runtimes(proc_root);
-    if runtimes.is_empty() {
-        return None;
-    }
-
-    // docker-proxy present ⇒ userland-proxy enabled ⇒ published ports visible.
-    if running_docker_proxies(proc_root) {
+    let (runtimes, proxy_running) = scan_runtimes_and_proxies(proc_root);
+    if runtimes.is_empty() || proxy_running {
         return None;
     }
 
@@ -43,28 +38,32 @@ pub fn detect_container_warning(proc_root: &Path) -> Option<Degradation> {
     Some(Degradation::ContainerPortsHidden(msg))
 }
 
-/// Best-effort detection of active container runtimes.
+/// One `/proc` traversal for both halves of the heuristic.
 ///
-/// This is a static snapshot at scan time. It only needs to be right often
-/// enough to show a useful status-bar hint; a false negative is acceptable.
-/// Runtime attribution goes through `cgroup::parse_cgroup_line`, so the
-/// daemon's own unit (`docker.service`) and host-level `docker-proxy-…` scopes
-/// are not mistaken for containers.
-fn active_runtimes(proc_root: &Path) -> Vec<&'static str> {
-    let mut seen = Vec::new();
+/// The previous implementation walked every pid twice — once reading `cgroup`,
+/// once reading `cmdline` — to answer two questions about the same set of
+/// processes. Both reads happen per pid here, and the loop can stop as soon as
+/// both answers are settled (a runtime was seen and a docker-proxy was seen,
+/// which means no warning is possible).
+fn scan_runtimes_and_proxies(proc_root: &Path) -> (Vec<&'static str>, bool) {
+    let mut seen: Vec<&'static str> = Vec::new();
+    let mut proxy_running = false;
 
-    if let Ok(entries) = std::fs::read_dir(proc_root) {
-        for entry in entries.flatten() {
-            let pid_str = entry.file_name().to_string_lossy().into_owned();
-            let Ok(pid) = pid_str.parse::<i32>() else {
-                continue;
-            };
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return (seen, proxy_running);
+    };
 
-            let cgroup = proc_root.join(pid.to_string()).join("cgroup");
-            let Ok(data) = std::fs::read_to_string(cgroup) else {
-                continue;
-            };
+    for entry in entries.flatten() {
+        let pid_str = entry.file_name().to_string_lossy().into_owned();
+        let Ok(pid) = pid_str.parse::<i32>() else {
+            continue;
+        };
+        let pid_dir = proc_root.join(pid.to_string());
 
+        // Runtime attribution uses the structured cgroup parser, so the
+        // daemon's own unit (`docker.service`) and host-level
+        // `docker-proxy-…` scopes are not mistaken for containers.
+        if let Ok(data) = std::fs::read_to_string(pid_dir.join("cgroup")) {
             for line in data.lines() {
                 let Some(container) = super::cgroup::parse_cgroup_line(line) else {
                     continue;
@@ -81,40 +80,28 @@ fn active_runtimes(proc_root: &Path) -> Vec<&'static str> {
                 }
             }
         }
-    }
 
-    seen
-}
-
-/// Return true if any `docker-proxy` process is currently visible.
-fn running_docker_proxies(proc_root: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(proc_root) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
-            continue;
-        };
-
-        let cmdline = proc_root.join(pid.to_string()).join("cmdline");
-        let Ok(data) = std::fs::read(cmdline) else {
-            continue;
-        };
         // Match any argv spelling by basename: distros ship the binary at
         // /usr/bin/docker-proxy, /usr/libexec/docker/docker-proxy,
-        // /usr/lib/docker/docker-proxy, etc. The old exact-path list missed
-        // everything but /usr/bin and raised a spurious hidden-ports warning
-        // on boxes that do have the userland proxy running.
-        if data.split(|b| *b == 0).any(|arg| {
-            std::path::Path::new(std::str::from_utf8(arg).unwrap_or(""))
-                .file_name()
-                .is_some_and(|f| f == "docker-proxy")
-        }) {
-            return true;
+        // /usr/lib/docker/docker-proxy, etc.
+        if !proxy_running {
+            if let Ok(data) = std::fs::read(pid_dir.join("cmdline")) {
+                proxy_running = data.split(|b| *b == 0).any(|arg| {
+                    std::path::Path::new(std::str::from_utf8(arg).unwrap_or(""))
+                        .file_name()
+                        .is_some_and(|f| f == "docker-proxy")
+                });
+            }
+        }
+
+        if proxy_running && !seen.is_empty() {
+            // Runtime present AND userland proxy present: published ports are
+            // visible, so this scan can never produce the warning.
+            break;
         }
     }
 
-    false
+    (seen, proxy_running)
 }
 
 #[cfg(test)]

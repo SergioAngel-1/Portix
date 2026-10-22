@@ -67,7 +67,7 @@ pub struct Engine {
     registry: DetectorRegistry,
     config: Config,
     num_cpus: usize,
-    /// Last container-warning result, recomputed at most once per 10 s: the
+    /// Last container-warning result, recomputed at most once per 30 s: the
     /// heuristic walks all of `/proc` (cgroup + cmdline of every pid) and is
     /// far too expensive to run on every refresh.
     container_warning: Option<(Instant, Option<Degradation>)>,
@@ -553,14 +553,14 @@ impl Engine {
         data
     }
 
-    /// The container warning, recomputed at most once per 10 s.
+    /// The container warning, recomputed at most once per 30 s.
     ///
     /// `platform::container_warning` walks all of `/proc` (one cgroup and one
     /// cmdline read per pid); running that on every refresh would blow the
-    /// hot-refresh budget. Ten seconds is plenty of granularity for a
+    /// hot-refresh budget. Thirty seconds is plenty of granularity for a
     /// status-bar hint.
     fn container_warning_cached(&mut self) -> Option<Degradation> {
-        const TTL: std::time::Duration = std::time::Duration::from_secs(10);
+        const TTL: std::time::Duration = std::time::Duration::from_secs(30);
         if let Some((at, deg)) = &self.container_warning {
             if at.elapsed() < TTL {
                 return deg.clone();
