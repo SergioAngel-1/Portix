@@ -313,8 +313,24 @@ impl App {
     }
 
     pub fn update_snapshot(&mut self, snapshot: SharedSnapshot) {
+        // `selected` indexes `filtered_indices`, and every snapshot is
+        // re-sorted by port. A service starting on a lower port (or one
+        // exiting) shifts the row under the cursor, so `x`/`o`/`y` would hit
+        // a different service than the one the user was looking at. Remember
+        // the row's socket inode — the same identity `Effect::KillRequest`
+        // uses — before refiltering, then follow it to its new position.
+        let selected_inode = self.selected_service().map(|service| service.socket.inode);
         self.snapshot = snapshot;
         self.update_filtered();
+        if let Some(inode) = selected_inode {
+            if let Some(position) = self
+                .filtered_indices
+                .iter()
+                .position(|&idx| self.snapshot.services[idx].socket.inode == inode)
+            {
+                self.selected = position;
+            }
+        }
     }
 }
 
@@ -597,6 +613,55 @@ mod tests {
 
         assert_eq!(app.filtered_indices.len(), 1);
         assert_eq!(app.selected, 0, "selection must not dangle past the filter");
+    }
+
+    /// A refresh is re-sorted by port: a service that starts on a lower port
+    /// must not shift the row under the cursor. The selection follows the
+    /// socket inode, so `x`/`o`/`y` keep acting on the service on screen.
+    #[test]
+    fn test_selection_follows_the_same_inode_when_a_lower_port_appears() {
+        let mut app = app_with_services(3);
+        app.selected = 1;
+        let selected_inode = app.selected_service().unwrap().socket.inode;
+
+        let mut services = app.snapshot.services.clone();
+        let mut lower = services[0].clone();
+        lower.socket.port = 2999;
+        lower.socket.inode = 99;
+        lower.id = ServiceId::from_socket(&lower.socket);
+        services.insert(0, lower);
+        app.update_snapshot(Arc::new(Snapshot {
+            services,
+            taken_at_epoch_secs: 0,
+            scan_duration_ms: 1,
+            degradations: Vec::new(),
+        }));
+
+        assert_eq!(app.selected, 2, "the same row moved down one position");
+        assert_eq!(app.selected_service().unwrap().socket.inode, selected_inode);
+    }
+
+    #[test]
+    fn test_selection_is_clamped_when_the_selected_service_vanishes() {
+        let mut app = app_with_services(3);
+        app.selected = 2;
+        let services = app.snapshot.services[..2].to_vec();
+        app.update_snapshot(Arc::new(Snapshot {
+            services,
+            taken_at_epoch_secs: 0,
+            scan_duration_ms: 1,
+            degradations: Vec::new(),
+        }));
+
+        assert_eq!(app.selected, 1, "no dangling index after the row exits");
+        assert_eq!(app.selected_service().unwrap().socket.inode, 1);
+    }
+
+    #[test]
+    fn test_no_selection_on_an_empty_snapshot() {
+        let app = app_with_services(0);
+        assert_eq!(app.selected, 0);
+        assert!(app.selected_service().is_none());
     }
 
     #[test]
