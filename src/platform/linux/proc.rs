@@ -269,45 +269,111 @@ pub fn effective_uid() -> u32 {
     }
 }
 
-/// Resolve a numeric UID to a username via the POSIX `getpwuid_r` API.///
+/// Ceiling for the growable passwd-lookup buffer.
+///
+/// `ERANGE` means the entry did not fit; doubling from the `sysconf` hint
+/// clears any real NIS/LDAP entry long before this. The cap keeps a bogus
+/// `_SC_GETPW_R_SIZE_MAX` (or a pathological NSS module) from allocating
+/// without bound on a hot path.
+const MAX_PASSWD_BUF: usize = 1024 * 1024;
+
+/// Initial buffer size for a `getpw*_r` lookup.
+///
+/// `sysconf(_SC_GETPW_R_SIZE_MAX)` is a hint, not a guarantee: it can return
+/// -1 (indeterminate) or a value still too small for the entry, which is why
+/// the callers grow on `ERANGE`.
+fn initial_passwd_buf_size() -> usize {
+    // SAFETY: `sysconf` takes a constant selector, has no pointer arguments,
+    // and only reads kernel configuration for this process.
+    #[allow(unsafe_code)]
+    let hint = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    if hint > 0 {
+        (hint as usize).min(MAX_PASSWD_BUF)
+    } else {
+        1024
+    }
+}
+
+/// Run one `getpw*_r` lookup with a growable buffer.
+///
+/// Both lookups share the same contract and the same traps: the callee fills
+/// the `passwd` in place, and every string field points *into* the caller's
+/// buffer, so the buffer must outlive `extract`. On `ERANGE` the entry did not
+/// fit — a fixed 4 KiB buffer used to give up and hide the user entirely,
+/// which on NIS/LDAP boxes means a blank USER column — so grow up to 1 MiB
+/// before returning `None`.
+///
+/// The lookup is a closure so `getpwuid_r` and `getpwnam_r` share this
+/// buffer/`MaybeUninit` handling instead of each carrying its own copy of the
+/// unsafe dance.
+fn with_passwd<T>(
+    lookup: impl Fn(*mut libc::passwd, *mut libc::c_char, usize, *mut *mut libc::passwd) -> libc::c_int,
+    extract: impl FnOnce(&libc::passwd) -> Option<T>,
+) -> Option<T> {
+    let mut size = initial_passwd_buf_size();
+    loop {
+        let mut buf = vec![0u8; size];
+        let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+        // `c_char` is `i8` on x86_64 but `u8` on aarch64/ppc64le/riscv; the
+        // old `as *mut i8` cast did not even compile on those targets. `cast`
+        // lets the compiler pick the right pointer type. The closure, not this
+        // loop, owns the `unsafe` call; it receives a live `size`-byte buffer
+        // and an out-parameter pointing at `pwd`.
+        let rc = lookup(
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+            size,
+            &mut result,
+        );
+
+        if rc == libc::ERANGE {
+            if size >= MAX_PASSWD_BUF {
+                return None;
+            }
+            size = (size * 2).min(MAX_PASSWD_BUF);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+
+        // SAFETY: a zero return with a non-null `result` means the lookup
+        // filled the struct it points at, and that every string field points
+        // into `buf`, which is still alive on this iteration.
+        #[allow(unsafe_code)]
+        let pw = unsafe { &*result };
+        return extract(pw);
+    }
+}
+
+/// Resolve a numeric UID to a username via the POSIX `getpwuid_r` API.
+///
 /// `pub(crate)`: the engine calls this through the L4 cache
 /// (`CacheStore::get_user`/`insert_user`); platform exposes the primitive,
 /// core decides how often it runs.
-///
-/// The buffer is sized at 4 KiB, which covers every username in active use
-/// (Linux caps user names at 32 bytes; even NIS/LDAP entries fit comfortably).
-/// A too-small buffer returns None and the caller degrades gracefully.
 pub(crate) fn uid_to_username(uid: u32) -> Option<String> {
-    let buf_size = 4096;
-    let mut buf = vec![0u8; buf_size];
-    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-
-    #[allow(unsafe_code)]
-    let rc = unsafe {
-        libc::getpwuid_r(
-            uid,
-            pwd.as_mut_ptr(),
-            buf.as_mut_ptr() as *mut i8,
-            buf_size,
-            &mut result,
-        )
-    };
-
-    if rc != 0 || result.is_null() {
-        return None;
-    }
-
-    #[allow(unsafe_code)]
-    let pw = unsafe { &*result };
-
-    if pw.pw_name.is_null() {
-        return None;
-    }
-
-    #[allow(unsafe_code)]
-    let name = unsafe { CStr::from_ptr(pw.pw_name) };
-    name.to_str().ok().map(|s| s.to_string())
+    with_passwd(
+        |pwd, buf, len, result| {
+            // SAFETY: the helper passes a live buffer of `len` bytes, a valid
+            // `passwd` slot, and a valid out-pointer.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::getpwuid_r(uid, pwd, buf, len, result)
+            }
+        },
+        |pw| {
+            if pw.pw_name.is_null() {
+                return None;
+            }
+            // SAFETY: `pw_name` is NUL-terminated and points into the lookup
+            // buffer, which outlives this closure.
+            #[allow(unsafe_code)]
+            let name = unsafe { CStr::from_ptr(pw.pw_name) };
+            name.to_str().ok().map(|s| s.to_string())
+        },
+    )
 }
 
 /// Home directory of another user, resolved via the POSIX `getpwnam_r` API.
@@ -317,37 +383,28 @@ pub(crate) fn uid_to_username(uid: u32) -> Option<String> {
 /// be ignored — and a theme save would land in `/root/.config`. `platform`
 /// exposes the primitive; `core` decides when to consult it.
 pub(crate) fn home_dir_for_user(name: &str) -> Option<PathBuf> {
-    let buf_size = 4096;
-    let mut buf = vec![0u8; buf_size];
-    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
     let c_name = std::ffi::CString::new(name).ok()?;
-
-    #[allow(unsafe_code)]
-    let rc = unsafe {
-        libc::getpwnam_r(
-            c_name.as_ptr(),
-            pwd.as_mut_ptr(),
-            buf.as_mut_ptr() as *mut i8,
-            buf_size,
-            &mut result,
-        )
-    };
-
-    if rc != 0 || result.is_null() {
-        return None;
-    }
-
-    #[allow(unsafe_code)]
-    let pw = unsafe { &*result };
-
-    if pw.pw_dir.is_null() {
-        return None;
-    }
-
-    #[allow(unsafe_code)]
-    let dir = unsafe { CStr::from_ptr(pw.pw_dir) };
-    dir.to_str().ok().map(PathBuf::from)
+    with_passwd(
+        |pwd, buf, len, result| {
+            // SAFETY: `c_name` is a live NUL-terminated string, and the helper
+            // passes a live buffer of `len` bytes, a valid `passwd` slot, and
+            // a valid out-pointer.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::getpwnam_r(c_name.as_ptr(), pwd, buf, len, result)
+            }
+        },
+        |pw| {
+            if pw.pw_dir.is_null() {
+                return None;
+            }
+            // SAFETY: `pw_dir` is NUL-terminated and points into the lookup
+            // buffer, which outlives this closure.
+            #[allow(unsafe_code)]
+            let dir = unsafe { CStr::from_ptr(pw.pw_dir) };
+            dir.to_str().ok().map(PathBuf::from)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -411,5 +468,12 @@ mod tests {
             "root must resolve to a home directory"
         );
         assert_eq!(home_dir_for_user("no-such-user-portix-test"), None);
+    }
+
+    /// UID 0 is `root` on every system that has a passwd database at all: the
+    /// shared lookup must return the name, not just the home directory.
+    #[test]
+    fn test_uid_to_username_resolves_root() {
+        assert_eq!(uid_to_username(0), Some("root".to_string()));
     }
 }
