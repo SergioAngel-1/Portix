@@ -43,6 +43,13 @@ const DOCKER_DESKTOP_TTL: Duration = Duration::from_secs(15);
 /// second buys nothing. A minute still discovers a Desktop that starts later.
 const DOCKER_DESKTOP_NEGATIVE_TTL: Duration = Duration::from_secs(60);
 
+/// How long the container-warning result is reused.
+///
+/// The heuristic walks all of `/proc` (one cgroup and one cmdline read per
+/// pid), far too expensive to run on every refresh. Thirty seconds is plenty
+/// of granularity for a status-bar hint.
+const CONTAINER_WARNING_TTL: Duration = Duration::from_secs(30);
+
 /// Cached owner of a listening socket's inode.
 ///
 /// `(pid, starttime)` is the same identity the kill path pins: a recycled PID
@@ -67,9 +74,9 @@ pub struct Engine {
     registry: DetectorRegistry,
     config: Config,
     num_cpus: usize,
-    /// Last container-warning result, recomputed at most once per 30 s: the
-    /// heuristic walks all of `/proc` (cgroup + cmdline of every pid) and is
-    /// far too expensive to run on every refresh.
+    /// Last container-warning result, recomputed at most once per
+    /// [`CONTAINER_WARNING_TTL`]: the heuristic walks all of `/proc` (cgroup +
+    /// cmdline of every pid) and is far too expensive to run on every refresh.
     container_warning: Option<(Instant, Option<Degradation>)>,
     /// Last Docker Desktop published-port mapping, with the `Instant` it was
     /// fetched. The query talks to a Unix socket and may block for the whole
@@ -558,16 +565,16 @@ impl Engine {
         data
     }
 
-    /// The container warning, recomputed at most once per 30 s.
+    /// The container warning, recomputed at most once per
+    /// [`CONTAINER_WARNING_TTL`].
     ///
     /// `platform::container_warning` walks all of `/proc` (one cgroup and one
     /// cmdline read per pid); running that on every refresh would blow the
     /// hot-refresh budget. Thirty seconds is plenty of granularity for a
     /// status-bar hint.
     fn container_warning_cached(&mut self) -> Option<Degradation> {
-        const TTL: std::time::Duration = std::time::Duration::from_secs(30);
         if let Some((at, deg)) = &self.container_warning {
-            if at.elapsed() < TTL {
+            if at.elapsed() < CONTAINER_WARNING_TTL {
                 return deg.clone();
             }
         }
