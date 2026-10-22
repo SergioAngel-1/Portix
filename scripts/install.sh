@@ -21,94 +21,12 @@
 #   BIN_DIR=/opt/portix PROFILE=release scripts/install.sh
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
-PROFILE="${PROFILE:-release}"
-BIN_DIR_EXPLICIT=0
-SUDO_MODE=0
-ALL_CONTEXTS=0
-NO_RECURSE="${PORTIX_NO_RECURSE:-0}"
-UPDATE_KEEP_PID="${PORTIX_UPDATE_KEEP_PID:-0}"
-ROOT_CLEANED="${PORTIX_ROOT_CLEANED:-0}"
-STOP_ONLY="${PORTIX_STOP_ONLY:-0}"
-
 usage() {
     # Print the leading comment header only. A fixed line range went stale the
     # moment the header grew and leaked `set -euo pipefail` plus code into
     # --help, so stop at the first non-comment line instead.
     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --bin-dir)
-            [ $# -ge 2 ] || { echo "--bin-dir needs a value" >&2; exit 2; }
-            BIN_DIR="$2"
-            BIN_DIR_EXPLICIT=1
-            shift 2
-            ;;
-        --profile)
-            [ $# -ge 2 ] || { echo "--profile needs a value" >&2; exit 2; }
-            PROFILE="$2"
-            shift 2
-            ;;
-        --sudo)
-            SUDO_MODE=1
-            shift
-            ;;
-        --all-contexts)
-            ALL_CONTEXTS=1
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "unknown argument: $1" >&2
-            usage >&2
-            exit 2
-            ;;
-    esac
-done
-
-case "$PROFILE" in
-    release)
-        BUILD_ARGS=(--release)
-        SRC_REL="target/release/portix"
-        ;;
-    dev)
-        BUILD_ARGS=()
-        SRC_REL="target/debug/portix"
-        ;;
-    *)
-        echo "unknown profile: $PROFILE (use 'release' or 'dev')" >&2
-        exit 2
-        ;;
-esac
-
-# --sudo means the system installation unless the caller explicitly selected a
-# destination. Running the script from `sudo portix --update` is also treated
-# as a system installation, even when --sudo is not present.
-if { [ "$SUDO_MODE" -eq 1 ] || [ "${EUID:-$(id -u)}" -eq 0 ]; } && [ "$BIN_DIR_EXPLICIT" -eq 0 ]; then
-    BIN_DIR="/usr/local/bin"
-fi
-
-if [ "$ALL_CONTEXTS" -eq 1 ] && [ "$SUDO_MODE" -eq 1 ]; then
-    echo "--all-contexts must be run as the normal user, not together with --sudo" >&2
-    exit 2
-fi
-
-if [ "$SUDO_MODE" -eq 1 ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    PRIV=(sudo)
-else
-    PRIV=()
-fi
-
-if [ "$NO_RECURSE" != "0" ] && [ "$NO_RECURSE" != "1" ]; then
-    echo "PORTIX_NO_RECURSE must be 0 or 1" >&2
-    exit 2
-fi
 
 run_priv() {
     if [ "${#PRIV[@]}" -gt 0 ]; then
@@ -164,42 +82,86 @@ clear_runtime_caches() {
     remove_exact_dir "$home/.local/state/portix"
 }
 
+# Options that consume the following argv element. Treating a value as the
+# command made `sudo -u root /usr/local/bin/portix` look like `sudo root`.
+# `--preserve-env` is deliberately absent: its list is optional and can only
+# be attached with `=`, so a bare `--preserve-env` never consumes the command.
+sudo_option_expects_value() {
+    case "$1" in
+        -u|-g|-C|-D|-h|-p|-r|-t|-U|-T) return 0 ;;
+        --user|--group|--close-from|--chdir|--host|--prompt|--role|--type|--other-user|--command-timeout) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Decide from a process's argv alone whether it is Portix. Pure so
+# scripts/test-install.sh can assert the sudo rules without real processes.
+# argv[0] is the only token that names the executable: arguments that merely
+# contain a path called portix (`vim portix.rs`, `sudo less ~/bin/portix`)
+# belong to other programs and must survive an update.
+argv_is_portix() {
+    local -a argv=("$@")
+    local i=0 token
+
+    [ "${#argv[@]}" -gt 0 ] || return 1
+
+    case "${argv[0]##*/}" in
+        portix|portix-static) return 0 ;;
+        sudo) ;;
+        *) return 1 ;;
+    esac
+
+    # `sudo portix` leaves a sudo supervisor around the TUI. Skip sudo's own
+    # options, including the value-taking ones, then inspect the first command.
+    i=1
+    while [ "$i" -lt "${#argv[@]}" ]; do
+        token="${argv[i]}"
+        case "$token" in
+            --)
+                i=$((i + 1))
+                break
+                ;;
+            --*=*)
+                i=$((i + 1))
+                ;;
+            -*)
+                if sudo_option_expects_value "$token"; then
+                    i=$((i + 2))
+                else
+                    i=$((i + 1))
+                fi
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    [ "$i" -lt "${#argv[@]}" ] || return 1
+    case "${argv[i]##*/}" in
+        portix|portix-static) return 0 ;;
+    esac
+    return 1
+}
+
 is_portix_process() {
     local pid="$1"
-    local exe first cmdline
+    local -a argv=()
+    local exe
+
+    # An executable can be replaced while an old instance is still alive, and a
+    # project path or URL containing "portix" is not Portix. argv is the primary
+    # answer; exe is only checked when argv does not identify the program.
+    # The group keeps a vanished PID's redirection error out of stderr: bash
+    # prints it before a trailing `2>/dev/null` on `mapfile` could apply.
+    { mapfile -d '' -t argv < "/proc/$pid/cmdline"; } 2>/dev/null || argv=()
+    if argv_is_portix "${argv[@]}"; then
+        return 0
+    fi
 
     exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
     case "${exe##*/}" in
-        portix|portix-static)
-            return 0
-            ;;
-    esac
-
-    # An executable can be replaced while an old instance is still alive. Use
-    # argv as a fallback, but inspect only the executable token; a project path
-    # or URL containing the word "portix" must not be treated as Portix.
-    # Feed the path to `cat` rather than using shell input redirection: a PID
-    # can disappear between the directory glob and this read, and bash would
-    # print a redirection error before `2>/dev/null` could apply.
-    cmdline="$(cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' || true)"
-    first="${cmdline%% *}"
-    case "${first##*/}" in
-        portix|portix-static)
-            return 0
-            ;;
-        sudo)
-            # `sudo portix` leaves a sudo supervisor around the TUI. Include
-            # that supervisor so updates do not leave a second stale wrapper.
-            local rest token
-            rest="${cmdline#* }"
-            for token in $rest; do
-                case "${token##*/}" in
-                    portix|portix-static)
-                        return 0
-                        ;;
-                esac
-            done
-            ;;
+        portix|portix-static) return 0 ;;
     esac
 
     return 1
@@ -468,56 +430,145 @@ install_system_integration() {
     fi
 }
 
-cd "$PROJECT_ROOT"
-# Stop the privileged context first. If sudo authentication fails, do not stop
-# the user's instances or replace any binary: an update must be atomic from the
-# user's point of view. The caller's updater PID is excluded via
-# PORTIX_UPDATE_KEEP_PID.
-if [ "${EUID:-$(id -u)}" -ne 0 ] && [ "$STOP_ONLY" -eq 0 ] && [ "$ROOT_CLEANED" -eq 0 ]; then
-    stop_root_portix_via_sudo
-fi
-stop_existing_portix
+main() {
+    PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+    PROFILE="${PROFILE:-release}"
+    BIN_DIR_EXPLICIT=0
+    SUDO_MODE=0
+    ALL_CONTEXTS=0
+    NO_RECURSE="${PORTIX_NO_RECURSE:-0}"
+    UPDATE_KEEP_PID="${PORTIX_UPDATE_KEEP_PID:-0}"
+    ROOT_CLEANED="${PORTIX_ROOT_CLEANED:-0}"
+    STOP_ONLY="${PORTIX_STOP_ONLY:-0}"
 
-if [ "$STOP_ONLY" -eq 1 ]; then
-    echo "Stopped existing Portix instances."
-    exit 0
-fi
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --bin-dir)
+                [ $# -ge 2 ] || { echo "--bin-dir needs a value" >&2; exit 2; }
+                BIN_DIR="$2"
+                BIN_DIR_EXPLICIT=1
+                shift 2
+                ;;
+            --profile)
+                [ $# -ge 2 ] || { echo "--profile needs a value" >&2; exit 2; }
+                PROFILE="$2"
+                shift 2
+                ;;
+            --sudo)
+                SUDO_MODE=1
+                shift
+                ;;
+            --all-contexts)
+                ALL_CONTEXTS=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "unknown argument: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
 
-run_build
+    case "$PROFILE" in
+        release)
+            BUILD_ARGS=(--release)
+            SRC_REL="target/release/portix"
+            ;;
+        dev)
+            BUILD_ARGS=()
+            SRC_REL="target/debug/portix"
+            ;;
+        *)
+            echo "unknown profile: $PROFILE (use 'release' or 'dev')" >&2
+            exit 2
+            ;;
+    esac
 
-SRC="$PROJECT_ROOT/$SRC_REL"
-[ -x "$SRC" ] || { echo "build did not produce executable: $SRC" >&2; exit 1; }
-
-run_priv install -d -m 0755 "$BIN_DIR"
-run_priv install -m 0755 "$SRC" "$BIN_DIR/portix"
-clear_all_runtime_caches
-
-if [ "$SUDO_MODE" -eq 1 ] || [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    install_system_integration
-else
-    install_user_integration
-fi
-
-if [ "$NO_RECURSE" -eq 0 ] && { [ "$ALL_CONTEXTS" -eq 1 ] || { [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; }; }; then
-    if [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
-        # `sudo portix --update` starts here as root. Update the invoking
-        # user's binary and desktop/autostart integration without asking sudo
-        # to recurse back into the root context.
-        INVOKING_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
-        if [ -n "$INVOKING_HOME" ]; then
-            echo "==> updating invoking user context: $SUDO_USER"
-            runuser -u "$SUDO_USER" -- env HOME="$INVOKING_HOME" \
-                PORTIX_NO_RECURSE=1 PORTIX_ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
-                BIN_DIR="$INVOKING_HOME/.local/bin" \
-                "$PROJECT_ROOT/scripts/install.sh" --profile "$PROFILE"
-        fi
-    else
-        echo "==> updating privileged context via sudo"
-        sudo --preserve-env=SUDO_USER env \
-            PORTIX_NO_RECURSE=1 PORTIX_ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
-            "$PROJECT_ROOT/scripts/install.sh" --sudo --profile "$PROFILE"
+    # --sudo means the system installation unless the caller explicitly selected a
+    # destination. Running the script from `sudo portix --update` is also treated
+    # as a system installation, even when --sudo is not present.
+    if { [ "$SUDO_MODE" -eq 1 ] || [ "${EUID:-$(id -u)}" -eq 0 ]; } && [ "$BIN_DIR_EXPLICIT" -eq 0 ]; then
+        BIN_DIR="/usr/local/bin"
     fi
-fi
 
-echo "Installed: $BIN_DIR/portix"
-"$BIN_DIR/portix" --version 2>/dev/null || true
+    if [ "$ALL_CONTEXTS" -eq 1 ] && [ "$SUDO_MODE" -eq 1 ]; then
+        echo "--all-contexts must be run as the normal user, not together with --sudo" >&2
+        exit 2
+    fi
+
+    if [ "$SUDO_MODE" -eq 1 ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        PRIV=(sudo)
+    else
+        PRIV=()
+    fi
+
+    if [ "$NO_RECURSE" != "0" ] && [ "$NO_RECURSE" != "1" ]; then
+        echo "PORTIX_NO_RECURSE must be 0 or 1" >&2
+        exit 2
+    fi
+    cd "$PROJECT_ROOT"
+    # Stop the privileged context first. If sudo authentication fails, do not stop
+    # the user's instances or replace any binary: an update must be atomic from the
+    # user's point of view. The caller's updater PID is excluded via
+    # PORTIX_UPDATE_KEEP_PID.
+    if [ "${EUID:-$(id -u)}" -ne 0 ] && [ "$STOP_ONLY" -eq 0 ] && [ "$ROOT_CLEANED" -eq 0 ]; then
+        stop_root_portix_via_sudo
+    fi
+    stop_existing_portix
+
+    if [ "$STOP_ONLY" -eq 1 ]; then
+        echo "Stopped existing Portix instances."
+        exit 0
+    fi
+
+    run_build
+
+    SRC="$PROJECT_ROOT/$SRC_REL"
+    [ -x "$SRC" ] || { echo "build did not produce executable: $SRC" >&2; exit 1; }
+
+    run_priv install -d -m 0755 "$BIN_DIR"
+    run_priv install -m 0755 "$SRC" "$BIN_DIR/portix"
+    clear_all_runtime_caches
+
+    if [ "$SUDO_MODE" -eq 1 ] || [ "${EUID:-$(id -u)}" -eq 0 ]; then
+        install_system_integration
+    else
+        install_user_integration
+    fi
+
+    if [ "$NO_RECURSE" -eq 0 ] && { [ "$ALL_CONTEXTS" -eq 1 ] || { [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; }; }; then
+        if [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+            # `sudo portix --update` starts here as root. Update the invoking
+            # user's binary and desktop/autostart integration without asking sudo
+            # to recurse back into the root context.
+            INVOKING_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)"
+            if [ -n "$INVOKING_HOME" ]; then
+                echo "==> updating invoking user context: $SUDO_USER"
+                runuser -u "$SUDO_USER" -- env HOME="$INVOKING_HOME" \
+                    PORTIX_NO_RECURSE=1 PORTIX_ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
+                    BIN_DIR="$INVOKING_HOME/.local/bin" \
+                    "$PROJECT_ROOT/scripts/install.sh" --profile "$PROFILE"
+            fi
+        else
+            echo "==> updating privileged context via sudo"
+            sudo --preserve-env=SUDO_USER env \
+                PORTIX_NO_RECURSE=1 PORTIX_ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
+                "$PROJECT_ROOT/scripts/install.sh" --sudo --profile "$PROFILE"
+        fi
+    fi
+
+    echo "Installed: $BIN_DIR/portix"
+    "$BIN_DIR/portix" --version 2>/dev/null || true
+}
+
+# The script is sourceable so scripts/test-install.sh can exercise argv_is_portix
+# without running an install. Only an executed script runs main.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
