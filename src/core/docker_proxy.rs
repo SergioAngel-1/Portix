@@ -64,6 +64,16 @@ struct DockerApiPort {
 /// caches both hits and misses, so this timeout is only paid on a cache miss.
 const DOCKER_API_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Hard cap on a Docker API response. A `DOCKER_HOST` pointing at any Unix
+/// socket can return an arbitrarily large body; the collector must not grow
+/// memory with it.
+const DOCKER_API_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Overall deadline for reading a Docker API response. Per-operation read
+/// timeouts only bound a single `read`; a peer that drips one byte just under
+/// the timeout would otherwise keep the collector busy forever.
+const DOCKER_API_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Read Docker Desktop's local API endpoint and list running containers with
 /// published ports. This uses only a Unix socket; it never opens a TCP socket.
 pub fn read_docker_desktop(socket: Option<&Path>) -> Option<DockerDesktopData> {
@@ -81,9 +91,37 @@ pub fn read_docker_desktop(socket: Option<&Path>) -> Option<DockerDesktopData> {
 
     let request = b"GET /v1.41/containers/json?all=0 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     stream.write_all(request).ok()?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).ok()?;
+    let response = read_bounded(&mut stream, DOCKER_API_MAX_BYTES, DOCKER_API_DEADLINE)?;
     parse_container_list_response(&response)
+}
+
+/// Read a response with both a byte cap and an overall deadline.
+///
+/// The caller's per-operation timeouts still bound each individual `read`, but
+/// only this loop bounds the whole response: without it, a socket that drips
+/// bytes (any `DOCKER_HOST` Unix socket) stalls the scan and grows `response`
+/// without limit. Returns `None` on any read error, once the cap would be
+/// exceeded, or when the deadline passes.
+fn read_bounded<R: Read>(mut r: R, cap: usize, deadline: std::time::Duration) -> Option<Vec<u8>> {
+    let started = std::time::Instant::now();
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if started.elapsed() >= deadline {
+            return None;
+        }
+        match r.read(&mut chunk) {
+            Ok(0) => return Some(response),
+            Ok(n) => {
+                if response.len() + n > cap {
+                    return None;
+                }
+                response.extend_from_slice(&chunk[..n]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
 }
 
 fn parse_container_list_response(response: &[u8]) -> Option<DockerDesktopData> {
@@ -337,6 +375,33 @@ mod tests {
             }],
             host_process: "com.docker.backend".into(),
         }
+    }
+
+    #[test]
+    fn read_bounded_returns_a_response_under_the_cap() {
+        let payload = b"HTTP/1.1 200 OK\r\n\r\n[]";
+        assert_eq!(
+            read_bounded(&payload[..], 1024, std::time::Duration::from_secs(1)),
+            Some(payload.to_vec())
+        );
+    }
+
+    #[test]
+    fn read_bounded_rejects_a_response_over_the_cap() {
+        let payload = [b'x'; 64];
+        assert_eq!(
+            read_bounded(&payload[..], 32, std::time::Duration::from_secs(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn read_bounded_stops_once_the_deadline_has_passed() {
+        let payload = b"[]";
+        assert_eq!(
+            read_bounded(&payload[..], 1024, std::time::Duration::ZERO),
+            None
+        );
     }
 
     #[test]
