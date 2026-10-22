@@ -59,19 +59,55 @@ test_render_desktop() {
     tmpdir="$(mktemp -d)"
     template="$tmpdir/portix.desktop.in"
     destination="$tmpdir/portix.desktop"
-    printf 'Exec=@PORTIX_LAUNCH@\nTryExec=@PORTIX_BIN@\nUpdate=@PORTIX_UPDATE@\nAutostart=@PORTIX_AUTOSTART@\n' > "$template"
-    render_desktop "$template" "$destination" "$binary" "$launch" "$update" "$autostart"
+    printf 'Exec=@PORTIX_LAUNCH@\nTryExec=@PORTIX_BIN@\nUpdate=@PORTIX_UPDATE@\nAutostart=@PORTIX_AUTOSTART@\nTerminal=@PORTIX_TERMINAL_FLAG@\n' > "$template"
+    render_desktop "$template" "$destination" "$binary" "$launch" "$update" "$autostart" true
     if ! grep -Fxq "TryExec=$binary" "$destination" ||
         ! grep -Fxq "Exec=$launch" "$destination" ||
         ! grep -Fxq "Update=$update" "$destination" ||
-        ! grep -Fxq "Autostart=$autostart" "$destination"; then
+        ! grep -Fxq "Autostart=$autostart" "$destination" ||
+        ! grep -Fxq "Terminal=true" "$destination"; then
         printf 'FAIL: render_desktop corrupted a path with sed metacharacters\n' >&2
         failures=$((failures + 1))
     fi
     rm -rf -- "$tmpdir"
 }
 
+# ghostty is only the default when it is actually installed; otherwise the
+# desktop supplies the terminal (Terminal=true).
+test_default_terminal() {
+    local bindir
+
+    bindir="$(mktemp -d)"
+    if [ -n "$(PATH="$bindir" default_terminal)" ]; then
+        printf 'FAIL: default_terminal invented a terminal\n' >&2
+        failures=$((failures + 1))
+    fi
+    : > "$bindir/ghostty"
+    chmod +x "$bindir/ghostty"
+    if [ "$(PATH="$bindir" default_terminal)" != "ghostty" ]; then
+        printf 'FAIL: default_terminal did not pick ghostty from PATH\n' >&2
+        failures=$((failures + 1))
+    fi
+    rm -rf -- "$bindir"
+}
+
+test_terminal_exec() {
+    TERMINAL=""
+    if [ "$(terminal_exec /x/portix)" != "/x/portix" ]; then
+        printf 'FAIL: terminal_exec added a terminal when none was configured\n' >&2
+        failures=$((failures + 1))
+    fi
+    TERMINAL=foot
+    if [ "$(terminal_exec /x/portix)" != "foot -e /x/portix" ]; then
+        printf 'FAIL: terminal_exec did not prefix the configured terminal\n' >&2
+        failures=$((failures + 1))
+    fi
+    TERMINAL=""
+}
+
 test_render_desktop
+test_default_terminal
+test_terminal_exec
 
 if [ "$failures" -ne 0 ]; then
     printf '%d test(s) failed\n' "$failures" >&2

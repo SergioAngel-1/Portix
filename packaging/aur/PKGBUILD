@@ -33,8 +33,9 @@ package() {
     install -Dm755 target/release/portix "$pkgdir/usr/bin/portix"
     install -d "$pkgdir/usr/share/applications"
     sed -e 's|@PORTIX_BIN@|/usr/bin/portix|g' \
-        -e 's|@PORTIX_LAUNCH@|ghostty -e sudo /usr/bin/portix|g' \
-        -e 's|@PORTIX_UPDATE@|ghostty -e sudo /usr/bin/portix --update --all-contexts|g' \
+        -e 's|@PORTIX_LAUNCH@|sudo /usr/bin/portix|g' \
+        -e 's|@PORTIX_UPDATE@|sudo /usr/bin/portix --update --all-contexts|g' \
+        -e 's|@PORTIX_TERMINAL_FLAG@|true|g' \
         packaging/desktop/portix.desktop.in \
         > "$pkgdir/usr/share/applications/portix.desktop"
     install -Dm644 packaging/desktop/icons/hicolor/256x256/apps/portix.png \

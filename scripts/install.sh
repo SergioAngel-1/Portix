@@ -13,12 +13,18 @@
 #   scripts/install.sh --sudo                  # /usr/local/bin + system desktop entry
 #   scripts/install.sh --all-contexts          # user install, then privileged install
 #   scripts/install.sh --bin-dir "$HOME/.cargo/bin"
+#   scripts/install.sh --terminal foot         # terminal for the desktop launchers
+#
+# Desktop launchers use ghostty when it is on PATH; otherwise they ask the
+# desktop for its terminal (Terminal=true). --terminal / PORTIX_TERMINAL
+# overrides that choice.
 #
 # Every install/update first stops all other Portix instances (user and root),
 # allowing only the process that initiated the update to survive.
 #
 # Environment variables:
 #   BIN_DIR=/opt/portix PROFILE=release scripts/install.sh
+#   PORTIX_TERMINAL=foot scripts/install.sh
 set -euo pipefail
 
 usage() {
@@ -26,6 +32,14 @@ usage() {
     # moment the header grew and leaked `set -euo pipefail` plus code into
     # --help, so stop at the first non-comment line instead.
     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
+}
+
+# The launcher keeps using ghostty only where it exists. Pure enough to test
+# with a temporary PATH; an empty result means "use the desktop's terminal".
+default_terminal() {
+    if command -v ghostty >/dev/null 2>&1; then
+        printf 'ghostty\n'
+    fi
 }
 
 run_priv() {
@@ -363,6 +377,17 @@ sed_replacement() {
     printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'
 }
 
+# Prefix a command with the configured terminal. CMD may carry its own flags
+# (`--terminal "kitty --title Portix"`); when there is none, the desktop runs
+# the command directly and Terminal=true supplies the terminal.
+terminal_exec() {
+    if [ -n "$TERMINAL" ]; then
+        printf '%s -e %s' "$TERMINAL" "$1"
+    else
+        printf '%s' "$1"
+    fi
+}
+
 render_desktop() {
     local template="$1"
     local destination="$2"
@@ -370,6 +395,7 @@ render_desktop() {
     local launch="$4"
     local update="$5"
     local autostart="$6"
+    local terminal_flag="$7"
     local binary_escaped launch_escaped update_escaped autostart_escaped
 
     binary_escaped="$(sed_replacement "$binary")"
@@ -380,6 +406,7 @@ render_desktop() {
         -e "s|@PORTIX_LAUNCH@|$launch_escaped|g" \
         -e "s|@PORTIX_UPDATE@|$update_escaped|g" \
         -e "s|@PORTIX_AUTOSTART@|$autostart_escaped|g" \
+        -e "s|@PORTIX_TERMINAL_FLAG@|$terminal_flag|g" \
         "$template" > "$destination"
 }
 
@@ -390,8 +417,9 @@ install_user_integration() {
     local autostart_dir="$config_home/autostart"
     local icons="$data_home/icons/hicolor"
     local binary="$BIN_DIR/portix"
-    local launch="ghostty -e $binary"
-    local update="ghostty -e $binary --update"
+    local launch update
+    launch="$(terminal_exec "$binary")"
+    update="$(terminal_exec "$binary --update")"
     # Autostart follows the user installation. The system installation has its
     # own launcher and must be selected explicitly with --all-contexts.
     local autostart_cmd="$launch"
@@ -399,9 +427,9 @@ install_user_integration() {
     mkdir -p "$applications" "$autostart_dir" \
         "$icons/256x256/apps" "$icons/512x512/apps"
     render_desktop "$PROJECT_ROOT/packaging/desktop/portix.desktop.in" \
-        "$applications/portix.desktop" "$binary" "$launch" "$update" "$autostart_cmd"
+        "$applications/portix.desktop" "$binary" "$launch" "$update" "$autostart_cmd" "$TERMINAL_FLAG"
     render_desktop "$PROJECT_ROOT/packaging/desktop/portix-autostart.desktop.in" \
-        "$autostart_dir/portix.desktop" "$binary" "$launch" "$update" "$autostart_cmd"
+        "$autostart_dir/portix.desktop" "$binary" "$launch" "$update" "$autostart_cmd" "$TERMINAL_FLAG"
     install -m 0644 "$PROJECT_ROOT/packaging/desktop/icons/hicolor/256x256/apps/portix.png" \
         "$icons/256x256/apps/portix.png"
     install -m 0644 "$PROJECT_ROOT/packaging/desktop/icons/hicolor/512x512/apps/portix.png" \
@@ -423,8 +451,9 @@ install_system_integration() {
     local applications="/usr/share/applications"
     local icons="/usr/share/icons/hicolor"
     local binary="$BIN_DIR/portix"
-    local launch="ghostty -e sudo $binary"
-    local update="ghostty -e sudo $binary --update --all-contexts"
+    local launch update
+    launch="$(terminal_exec "sudo $binary")"
+    update="$(terminal_exec "sudo $binary --update --all-contexts")"
     local autostart_cmd="$launch"
 
     run_priv install -d -m 0755 "$applications" \
@@ -435,7 +464,7 @@ install_system_integration() {
         # `set -e` aborts on the first failed privileged install; without this
         # trap the rendered desktop file and icon index leak into $TMPDIR.
         trap 'rm -f -- "$tmp_desktop" "$tmp_icon_index"' EXIT
-        render_desktop "$PROJECT_ROOT/packaging/desktop/portix.desktop.in" "$tmp_desktop" "$binary" "$launch" "$update" "$autostart_cmd"
+        render_desktop "$PROJECT_ROOT/packaging/desktop/portix.desktop.in" "$tmp_desktop" "$binary" "$launch" "$update" "$autostart_cmd" "$TERMINAL_FLAG"
         cp "$PROJECT_ROOT/packaging/desktop/index.theme" "$tmp_icon_index"
         run_priv install -m 0644 "$tmp_desktop" "$applications/portix.desktop"
         run_priv install -m 0644 "$tmp_icon_index" "$icons/index.theme"
@@ -444,7 +473,7 @@ install_system_integration() {
         rm -f -- "$tmp_desktop" "$tmp_icon_index"
         trap - EXIT
     else
-        render_desktop "$PROJECT_ROOT/packaging/desktop/portix.desktop.in" "$applications/portix.desktop" "$binary" "$launch" "$update" "$autostart_cmd"
+        render_desktop "$PROJECT_ROOT/packaging/desktop/portix.desktop.in" "$applications/portix.desktop" "$binary" "$launch" "$update" "$autostart_cmd" "$TERMINAL_FLAG"
         install -m 0644 "$PROJECT_ROOT/packaging/desktop/index.theme" "$icons/index.theme"
         install -m 0644 "$PROJECT_ROOT/packaging/desktop/icons/hicolor/256x256/apps/portix.png" "$icons/256x256/apps/portix.png"
         install -m 0644 "$PROJECT_ROOT/packaging/desktop/icons/hicolor/512x512/apps/portix.png" "$icons/512x512/apps/portix.png"
@@ -469,6 +498,8 @@ main() {
     UPDATE_KEEP_PID="${PORTIX_UPDATE_KEEP_PID:-0}"
     ROOT_CLEANED="${PORTIX_ROOT_CLEANED:-0}"
     STOP_ONLY="${PORTIX_STOP_ONLY:-0}"
+    TERMINAL="${PORTIX_TERMINAL:-}"
+    TERMINAL_EXPLICIT=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -476,6 +507,12 @@ main() {
                 [ $# -ge 2 ] || { echo "--bin-dir needs a value" >&2; exit 2; }
                 BIN_DIR="$2"
                 BIN_DIR_EXPLICIT=1
+                shift 2
+                ;;
+            --terminal)
+                [ $# -ge 2 ] || { echo "--terminal needs a value" >&2; exit 2; }
+                TERMINAL="$2"
+                TERMINAL_EXPLICIT=1
                 shift 2
                 ;;
             --profile)
@@ -517,6 +554,18 @@ main() {
             exit 2
             ;;
     esac
+
+    # Keep ghostty where it is installed (the historical launcher), otherwise
+    # let the desktop start the command itself with Terminal=true. An explicit
+    # --terminal "" also selects the desktop terminal.
+    if [ "$TERMINAL_EXPLICIT" -eq 0 ] && [ -z "$TERMINAL" ]; then
+        TERMINAL="$(default_terminal)"
+    fi
+    if [ -n "$TERMINAL" ]; then
+        TERMINAL_FLAG=false
+    else
+        TERMINAL_FLAG=true
+    fi
 
     # --sudo means the system installation unless the caller explicitly selected a
     # destination. Running the script from `sudo portix --update` is also treated
@@ -570,6 +619,9 @@ main() {
         install_user_integration
     fi
 
+    # The other context resolves its own defaults: pass the terminal that was
+    # chosen here (sudo resets the environment, and an explicit empty
+    # --terminal must not fall back to ghostty) so both launchers agree.
     if [ "$NO_RECURSE" -eq 0 ] && { [ "$ALL_CONTEXTS" -eq 1 ] || { [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; }; }; then
         if [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
             # `sudo portix --update` starts here as root. Update the invoking
@@ -581,13 +633,13 @@ main() {
                 runuser -u "$SUDO_USER" -- env HOME="$INVOKING_HOME" \
                     PORTIX_NO_RECURSE=1 PORTIX_ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
                     BIN_DIR="$INVOKING_HOME/.local/bin" \
-                    "$PROJECT_ROOT/scripts/install.sh" --profile "$PROFILE"
+                    "$PROJECT_ROOT/scripts/install.sh" --profile "$PROFILE" --terminal "$TERMINAL"
             fi
         else
             echo "==> updating privileged context via sudo"
             sudo --preserve-env=SUDO_USER env \
                 PORTIX_NO_RECURSE=1 PORTIX_ROOT_CLEANED=1 PORTIX_UPDATE_KEEP_PID="$UPDATE_KEEP_PID" \
-                "$PROJECT_ROOT/scripts/install.sh" --sudo --profile "$PROFILE"
+                "$PROJECT_ROOT/scripts/install.sh" --sudo --profile "$PROFILE" --terminal "$TERMINAL"
         fi
     fi
 

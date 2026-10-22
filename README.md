@@ -96,6 +96,12 @@ BIN_DIR=/opt/portix ./scripts/install.sh  # same settings as env vars
 # Portix runtime caches.
 ```
 
+Desktop launchers use `ghostty` when it is on `PATH`; on a machine without it
+they ask the desktop for its terminal instead. Choose another terminal with
+`--terminal CMD` (or `PORTIX_TERMINAL=CMD`), for example
+`./scripts/install.sh --terminal foot`. The AUR package uses the desktop
+terminal because it does not depend on ghostty.
+
 The `--update` flag runs `scripts/install.sh` from the source tree that was
 used to build the current binary. Before rebuilding, it stops other Portix
 instances so an old TUI cannot overlap the new version. A normal-user update
