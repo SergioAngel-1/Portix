@@ -211,8 +211,11 @@ portix --kill 3000 --force --yes   # SIGKILL, no prompt
 ```
 
 Exit codes: `0` success · `1` error · `2` bad usage (clap) · `3` nothing
-listening on that port. JSON output is wrapped in `schema_version` (currently
-`1`) so consumers can detect breaking changes.
+listening on that port. A `--kill` that did not free the port exits non-zero
+too — non-terminal stdin (pass `--yes`), a cancelled prompt, a changed owner or
+a failed signal — so `portix --kill 80 && pnpm dev` never starts a second
+server on a port that is still taken. JSON output is wrapped in
+`schema_version` (currently `1`) so consumers can detect breaking changes.
 
 ### Useful flags
 

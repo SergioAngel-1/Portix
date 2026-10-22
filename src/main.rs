@@ -345,6 +345,34 @@ fn print_table(engine: &mut Engine) -> Result<i32> {
 }
 
 fn kill_port(engine: &mut Engine, port: u16, force: bool, skip_confirm: bool) -> Result<i32> {
+    // The prompt is only meaningful with a terminal on stdin, and the answer
+    // must come from the real stdin. The inner function takes both explicitly
+    // so the refusal and the "no" path can be tested without a TTY.
+    let stdin = io::stdin();
+    let stdin_is_terminal = stdin.is_terminal();
+    kill_port_with_stdin(
+        engine,
+        port,
+        force,
+        skip_confirm,
+        stdin_is_terminal,
+        &mut stdin.lock(),
+    )
+}
+
+/// [`kill_port`] with the stdin facts injected for testing.
+///
+/// Any outcome other than [`exit::OK`] means the port was **not** freed: a
+/// script chaining `portix --kill 80 && pnpm dev` must not start a second
+/// server on a port that is still taken.
+fn kill_port_with_stdin(
+    engine: &mut Engine,
+    port: u16,
+    force: bool,
+    skip_confirm: bool,
+    stdin_is_terminal: bool,
+    input: &mut impl io::BufRead,
+) -> Result<i32> {
     let signal = if force { Signal::Kill } else { Signal::Term };
 
     // Fresh scan up front: the confirmation text must describe the process
@@ -401,9 +429,11 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, skip_confirm: bool) ->
     // confirmation meaningless anyway. Scripts get the same effect through
     // `--yes` / `kill_confirm = false`, which took the skip_confirm path
     // above.
-    if !io::stdin().is_terminal() {
+    if !stdin_is_terminal {
+        // Refusing is not success: the port is still taken, and exit 0 would
+        // let a `--kill 80 && pnpm dev` chain sail past a busy port.
         eprintln!("stdin is not a terminal; pass --yes to skip confirmation");
-        return Ok(exit::OK);
+        return Ok(exit::ERROR);
     }
 
     eprint!(
@@ -412,11 +442,12 @@ fn kill_port(engine: &mut Engine, port: u16, force: bool, skip_confirm: bool) ->
     );
     io::Write::flush(&mut io::stderr())?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    if !matches!(input.trim(), "y" | "Y" | "yes") {
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        // "Cancelled." is a refusal to free the port, not a successful kill.
         eprintln!("Cancelled.");
-        return Ok(exit::OK);
+        return Ok(exit::ERROR);
     }
     let expected = owner_pin(service);
 
@@ -1123,6 +1154,31 @@ mod tests {
             err.to_string().contains("process"),
             "port 80 must be found and the signal step must fail safely: {err}"
         );
+    }
+
+    /// A non-terminal stdin cannot answer the prompt, so `--kill` refuses.
+    /// That refusal must be an error: exit 0 would claim the port was freed
+    /// and let `portix --kill 80 && pnpm dev` proceed onto a busy port. The
+    /// synthetic pid would make any signal attempt fail loudly, so an
+    /// `Ok(ERROR)` proves no signal was sent.
+    #[test]
+    fn test_kill_port_non_tty_refuses_with_error() {
+        let dir = synthetic_listener_proc(8080, 9_000_000);
+        let engine = &mut Engine::new(Some(dir.path()), Config::default());
+        let mut input = io::Cursor::new(Vec::new());
+        let code = kill_port_with_stdin(engine, 8080, false, false, false, &mut input).unwrap();
+        assert_eq!(code, exit::ERROR);
+    }
+
+    /// Answering "no" leaves the port taken: that is a failure, not a
+    /// successful kill.
+    #[test]
+    fn test_kill_port_declined_prompt_is_error() {
+        let dir = synthetic_listener_proc(8080, 9_000_000);
+        let engine = &mut Engine::new(Some(dir.path()), Config::default());
+        let mut input = io::Cursor::new(b"n\n".to_vec());
+        let code = kill_port_with_stdin(engine, 8080, false, false, true, &mut input).unwrap();
+        assert_eq!(code, exit::ERROR);
     }
 
     fn test_app() -> App {
