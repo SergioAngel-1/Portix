@@ -170,12 +170,6 @@ mod tests {
     #[test]
     fn test_parse_tcp_listen() {
         let line = "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 486312 1 ffff888101234567 100 0 0 10 0";
-        // Debug: print the parts
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        eprintln!("Parts count: {}", parts.len());
-        for (i, part) in parts.iter().enumerate() {
-            eprintln!("  [{}]: {:?}", i, part);
-        }
         let socket = parse_proc_net_line(line, Protocol::Tcp).unwrap();
         assert_eq!(socket.port, 8080);
         assert_eq!(socket.state, TcpState::Listen);

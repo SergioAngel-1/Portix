@@ -292,6 +292,53 @@ pub fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Copy text to the desktop clipboard.
+///
+/// Plasma exposes Klipper over the session bus, so KDE users do not need an
+/// extra `wl-clipboard`/`xclip` package. Other desktops use the conventional
+/// Wayland/X11 helpers when installed. Each backend is attempted in order and
+/// a failing backend does not prevent a later fallback from being tried.
+pub fn copy_to_clipboard(text: &str) -> Result<()> {
+    let is_kde = looks_like_kde_session(
+        env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+        env::var("DESKTOP_SESSION").ok().as_deref(),
+        env::var("KDE_FULL_SESSION").ok().as_deref(),
+    );
+
+    let candidates = [
+        select_clipboard_backend(
+            is_kde,
+            command_available("qdbus6"),
+            command_available("qdbus"),
+            command_available("dbus-send"),
+            command_available("wl-copy"),
+            command_available("xclip"),
+            command_available("xsel"),
+        ),
+        command_available("wl-copy").then_some(ClipboardBackend::WlCopy),
+        command_available("xclip").then_some(ClipboardBackend::Xclip),
+        command_available("xsel").then_some(ClipboardBackend::Xsel),
+    ];
+
+    let mut attempted = false;
+    for backend in candidates.into_iter().flatten() {
+        attempted = true;
+        if run_clipboard_backend(backend, text) {
+            return Ok(());
+        }
+    }
+
+    if attempted {
+        Err(anyhow!(
+            "Clipboard backend failed (is the desktop session available?)"
+        ))
+    } else {
+        Err(anyhow!(
+            "No clipboard tool found (install wl-clipboard, xclip or xsel)"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -427,52 +474,5 @@ mod tests {
             .expect("qdbus6 should be callable");
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), marker);
-    }
-}
-
-/// Copy text to the desktop clipboard.
-///
-/// Plasma exposes Klipper over the session bus, so KDE users do not need an
-/// extra `wl-clipboard`/`xclip` package. Other desktops use the conventional
-/// Wayland/X11 helpers when installed. Each backend is attempted in order and
-/// a failing backend does not prevent a later fallback from being tried.
-pub fn copy_to_clipboard(text: &str) -> Result<()> {
-    let is_kde = looks_like_kde_session(
-        env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-        env::var("DESKTOP_SESSION").ok().as_deref(),
-        env::var("KDE_FULL_SESSION").ok().as_deref(),
-    );
-
-    let candidates = [
-        select_clipboard_backend(
-            is_kde,
-            command_available("qdbus6"),
-            command_available("qdbus"),
-            command_available("dbus-send"),
-            command_available("wl-copy"),
-            command_available("xclip"),
-            command_available("xsel"),
-        ),
-        command_available("wl-copy").then_some(ClipboardBackend::WlCopy),
-        command_available("xclip").then_some(ClipboardBackend::Xclip),
-        command_available("xsel").then_some(ClipboardBackend::Xsel),
-    ];
-
-    let mut attempted = false;
-    for backend in candidates.into_iter().flatten() {
-        attempted = true;
-        if run_clipboard_backend(backend, text) {
-            return Ok(());
-        }
-    }
-
-    if attempted {
-        Err(anyhow!(
-            "Clipboard backend failed (is the desktop session available?)"
-        ))
-    } else {
-        Err(anyhow!(
-            "No clipboard tool found (install wl-clipboard, xclip or xsel)"
-        ))
     }
 }

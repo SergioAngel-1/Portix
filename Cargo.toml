@@ -61,6 +61,13 @@ clap_complete = "4"
 [dev-dependencies]
 tempfile = "3"
 
+# `main.rs` is a separate crate root, so the `#![deny(unsafe_code)]` in
+# `lib.rs` does not cover it. Deny it for every target from one place; the
+# syscall wrappers in `platform::linux` opt back in with `#[allow(unsafe_code)]`
+# next to their SAFETY comments.
+[lints.rust]
+unsafe_code = "deny"
+
 [profile.release]
 opt-level = 3
 lto = true
